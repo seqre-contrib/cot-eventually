@@ -1376,8 +1376,8 @@ impl Bootstrapper<WithApps> {
     #[cfg(feature = "db")]
     async fn init_database(config: &DatabaseConfig) -> cot::Result<Option<Database>> {
         match &config.url {
-            Some(url) => {
-                let database = Database::new(url.as_str()).await?;
+            Some(_) => {
+                let database = Database::from_config(config).await?;
                 Ok(Some(database))
             }
             None => Ok(None),

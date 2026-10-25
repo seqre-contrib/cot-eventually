@@ -47,6 +47,15 @@ Database authentication backend. This enables [`DatabaseUserBackend`](struct@cot
 | Key | TOML Type | Default | Description |
 |---|---|---|---|
 | `url` | string | *(unset)* | The URL of the database, possibly with username, password, and other options. |
+| `sqlite` | table | [*(see below)*](#databasesqlite) | Options for SQLite connections, used when the URL points to an SQLite database. |
+
+### `[database.sqlite]`
+
+| Key | TOML Type | Default | Description |
+|---|---|---|---|
+| `journal_mode` | `"delete"`, `"truncate"`, `"persist"`, `"memory"`, `"wal"`, `"off"` | *(unset)* | The [journal mode](https://www.sqlite.org/pragma.html#pragma_journal_mode) of the database. The journal mode is stored in the database file once it's set to `wal`, so it applies to every later connection, too. |
+| `synchronous` | `"off"`, `"normal"`, `"full"`, `"extra"` | *(unset)* | The [synchronous](https://www.sqlite.org/pragma.html#pragma_synchronous) setting of each connection. `normal` is a common choice together with the `wal` journal mode: it is faster than SQLite's default, `full`, and still keeps the database consistent after a power loss. |
+| `busy_timeout` | string | *(unset)* | How long a connection waits for a lock on the database before it gives up with a "database is locked" error. When not set, it is 5 seconds. |
 
 ## `[cache]`
 
@@ -183,6 +192,11 @@ type = "none"
 
 [database]
 # url = ...
+
+[database.sqlite]
+# journal_mode = ...
+# synchronous = ...
+# busy_timeout = ...
 
 [cache]
 max_retries = 3
