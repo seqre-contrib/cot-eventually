@@ -122,9 +122,8 @@ impl CargoTomlManager {
         let package_manifests = workspace
             .members
             .iter()
-            .map(|member| {
-                let member_path = workspace_root.join(member);
-
+            .flat_map(|member| Self::expand_member(workspace_root, member, &workspace.exclude))
+            .map(|member_path| {
                 let member_manifest = Manifest::from_path(member_path.join("Cargo.toml"))
                     .expect("member manifest should be valid");
 
@@ -143,6 +142,35 @@ impl CargoTomlManager {
             package_manifests,
             current_package: None,
         }
+    }
+
+    /// Returns the package directories that a `members` entry of a workspace
+    /// manifest refers to.
+    ///
+    /// Like Cargo, an entry can be a glob pattern such as `crates/*`. It then
+    /// matches every directory with a `Cargo.toml` file, leaving out the
+    /// paths listed in `exclude`.
+    fn expand_member(workspace_root: &Path, member: &str, exclude: &[String]) -> Vec<PathBuf> {
+        let member_path = workspace_root.join(member);
+        if !member.contains(['*', '?', '[']) {
+            return vec![member_path];
+        }
+
+        let pattern = member_path
+            .to_str()
+            .expect("workspace paths should be valid UTF-8");
+        let excluded: Vec<PathBuf> = exclude
+            .iter()
+            .map(|path| workspace_root.join(path))
+            .collect();
+        let mut paths: Vec<PathBuf> = glob::glob(pattern)
+            .expect("workspace member should be a valid glob pattern")
+            .filter_map(Result::ok)
+            .filter(|path| path.join("Cargo.toml").is_file())
+            .filter(|path| !excluded.iter().any(|excluded| path.starts_with(excluded)))
+            .collect();
+        paths.sort();
+        paths
     }
 
     pub(crate) fn from_path(path: &Path) -> anyhow::Result<Option<Self>> {
@@ -384,6 +412,55 @@ mod tests {
                 }
                 CargoTomlManager::Package(_) => panic!("Expected workspace manifest"),
             }
+        }
+
+        #[test]
+        fn load_workspace_with_glob_members() {
+            let temp_dir = tempfile::TempDir::with_prefix("cot-test-").unwrap();
+            let root = temp_dir.path();
+            std::fs::write(
+                root.join("Cargo.toml"),
+                "[workspace]\nmembers = [\"crates/*\", \"tools\"]\nexclude = [\"crates/skipped\"]\n",
+            )
+            .unwrap();
+            for name in ["crates/first", "crates/second", "crates/skipped", "tools"] {
+                let package = root.join(name);
+                std::fs::create_dir_all(package.join("src")).unwrap();
+                std::fs::write(package.join("src/lib.rs"), "").unwrap();
+                let package_name = name.rsplit('/').next().unwrap();
+                std::fs::write(
+                    package.join("Cargo.toml"),
+                    format!(
+                        "[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+                    ),
+                )
+                .unwrap();
+            }
+            // matched by the pattern, but not a package
+            std::fs::create_dir_all(root.join("crates/not-a-package")).unwrap();
+
+            let manager = CargoTomlManager::from_path(&root.join("crates/second"))
+                .unwrap()
+                .unwrap();
+
+            let CargoTomlManager::Workspace(manager) = manager else {
+                panic!("Expected workspace manifest");
+            };
+            let mut names: Vec<_> = manager
+                .get_packages()
+                .iter()
+                .map(|package| package.get_package_name().to_owned())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["first", "second", "tools"]);
+            assert_eq!(manager.current_package.as_deref(), Some("second"));
+            assert_eq!(
+                manager
+                    .get_current_package_manager()
+                    .unwrap()
+                    .get_package_path(),
+                root.join("crates/second")
+            );
         }
 
         #[test]
