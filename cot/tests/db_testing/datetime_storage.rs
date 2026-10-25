@@ -258,9 +258,9 @@ async fn sqlite_jiff_text_format() {
     // `jiff::Timestamp` doesn't store the offset, so the values are always
     // written in UTC; other than that, the format is the same as for `chrono`.
     let mut expected = expected_text_models();
-    expected[1].datetime_fixed = "2023-01-02T11:34:56.789+00:00".to_owned();
-    expected[2].datetime_fixed = "2023-01-02T15:04:56.123456+00:00".to_owned();
-    expected[3].datetime_fixed = "2023-01-02T06:49:56.123456789+00:00".to_owned();
+    expected[1].datetime_fixed = "2026-10-04T11:34:56.789+00:00".to_owned();
+    expected[2].datetime_fixed = "2026-10-04T15:04:56.123456+00:00".to_owned();
+    expected[3].datetime_fixed = "2026-10-04T06:49:56.123456789+00:00".to_owned();
 
     let text_models = TextModel::objects().all(&**db).await.unwrap();
     assert_eq!(
@@ -373,7 +373,7 @@ async fn jiff_filter_and_order(db: &mut TestDatabase) {
     let mut third = models[2].clone();
     third.save(&**db).await.unwrap();
 
-    let threshold: jiff::Timestamp = "2023-01-02T12:34:56.5Z".parse().unwrap();
+    let threshold: jiff::Timestamp = "2026-10-04T12:34:56.5Z".parse().unwrap();
     let later = query!(JiffModel, $datetime_utc > threshold)
         .order_by([<JiffModel as Model>::Fields::datetime_utc.asc()])
         .all(&**db)
@@ -387,7 +387,7 @@ async fn jiff_filter_and_order(db: &mut TestDatabase) {
         [JiffModel::from(models[1].clone()).datetime_utc,]
     );
 
-    let datetime_threshold = jiff::civil::date(2023, 1, 2).at(12, 34, 56, 500_000_000);
+    let datetime_threshold = jiff::civil::date(2026, 10, 4).at(12, 34, 56, 500_000_000);
     let earlier = query!(JiffModel, $datetime < datetime_threshold)
         .order_by([<JiffModel as Model>::Fields::datetime.asc()])
         .all(&**db)
@@ -399,8 +399,8 @@ async fn jiff_filter_and_order(db: &mut TestDatabase) {
             .map(|model| model.datetime)
             .collect::<Vec<_>>(),
         [
-            jiff::civil::date(2023, 1, 2).at(12, 34, 56, 0),
-            jiff::civil::date(2023, 1, 2).at(12, 34, 56, 123_456_000),
+            jiff::civil::date(2026, 10, 4).at(12, 34, 56, 0),
+            jiff::civil::date(2026, 10, 4).at(12, 34, 56, 123_456_000),
         ]
     );
 }
