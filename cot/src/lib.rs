@@ -82,6 +82,7 @@ pub mod router;
 mod serializers;
 pub mod session;
 pub mod static_files;
+pub mod tasks;
 #[cfg(feature = "test")]
 pub mod test;
 pub mod utils;

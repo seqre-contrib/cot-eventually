@@ -44,6 +44,7 @@ hyper-util = { workspace = true, features = ["http1", "server-graceful", "tokio"
 idna = { workspace = true, optional = true }
 indexmap.workspace = true
 is_terminal_polyfill.workspace = true
+jiff = { workspace = true, features = ["default", "serde"] }
 lettre = { workspace = true, features = ["builder", "sendmail-transport", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-platform-verifier"], optional = true }
 matchit.workspace = true
 mime.workspace = true
