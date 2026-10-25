@@ -15,6 +15,7 @@ mod model;
 mod query;
 mod select_as_form_field;
 mod select_choice;
+mod static_files;
 
 use darling::Error;
 use darling::ast::NestedMeta;
@@ -34,6 +35,7 @@ use crate::model::impl_model_for_struct;
 use crate::query::{Query, query_to_tokens};
 use crate::select_as_form_field::impl_select_as_form_field_for_enum;
 use crate::select_choice::impl_select_choice_for_enum;
+use crate::static_files::static_files_to_tokens;
 
 #[proc_macro_derive(Form, attributes(form))]
 pub fn derive_form(input: TokenStream) -> TokenStream {
@@ -80,6 +82,11 @@ pub fn derive_model_helper(_item: TokenStream) -> TokenStream {
 pub fn query(input: TokenStream) -> TokenStream {
     let query_input = parse_macro_input!(input as Query);
     query_to_tokens(query_input).into()
+}
+
+#[proc_macro]
+pub fn static_files(input: TokenStream) -> TokenStream {
+    static_files_to_tokens(input).into()
 }
 
 /// An attribute macro that runs a test against every supported database
