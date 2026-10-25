@@ -320,6 +320,44 @@ pub trait Project {
     #[expect(unused_variables)]
     fn register_apps(&self, apps: &mut AppBuilder, context: &RegisterAppsContext) {}
 
+    /// Registers the application state for the project.
+    ///
+    /// Values put into the [`AppState`] are shared by the whole project and
+    /// can be accessed in request handlers with the
+    /// [`State`](crate::request::extractors::State) extractor. Each value is
+    /// identified by its type, so registering a second value of the same type
+    /// replaces the first one. Use a newtype to store several values of the
+    /// same type.
+    ///
+    /// This is useful for things that are created once and shared by all
+    /// requests, but don't belong in the configuration, such as clients for
+    /// external services or a clock that tests can replace.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::Project;
+    /// use cot::html::Html;
+    /// use cot::project::{AppState, RegisterStateContext};
+    /// use cot::request::extractors::State;
+    ///
+    /// #[derive(Debug, Clone)]
+    /// struct Greeting(String);
+    ///
+    /// struct MyProject;
+    /// impl Project for MyProject {
+    ///     fn register_state(&self, state: &mut AppState, context: &RegisterStateContext) {
+    ///         state.insert(Greeting("Hello".to_owned()));
+    ///     }
+    /// }
+    ///
+    /// async fn index(State(greeting): State<Greeting>) -> Html {
+    ///     Html::new(format!("{} world!", greeting.0))
+    /// }
+    /// ```
+    #[expect(unused_variables)]
+    fn register_state(&self, state: &mut AppState, context: &RegisterStateContext) {}
+
     /// Sets the authentication backend to use.
     ///
     /// Note that it's typically not necessary to override this method, as it
@@ -447,6 +485,89 @@ pub type AuthBackendContext = ProjectContext<WithCache>;
 /// An alias for `ProjectContext` in appropriate phase for use with the
 /// [`Project::middlewares`] method.
 pub type MiddlewareContext = ProjectContext<WithCache>;
+
+/// An alias for `ProjectContext` in appropriate phase for use with the
+/// [`Project::register_state`] method.
+pub type RegisterStateContext = ProjectContext<WithCache>;
+
+/// Values shared by the whole project, identified by their type.
+///
+/// The state is filled in [`Project::register_state`] when the project is
+/// bootstrapped, and its values can be accessed in request handlers with the
+/// [`State`](crate::request::extractors::State) extractor.
+///
+/// # Examples
+///
+/// ```
+/// use cot::project::AppState;
+///
+/// #[derive(Debug, Clone, PartialEq)]
+/// struct Greeting(String);
+///
+/// let mut state = AppState::new();
+/// state.insert(Greeting("Hello".to_owned()));
+///
+/// assert_eq!(state.get::<Greeting>(), Some(&Greeting("Hello".to_owned())));
+/// assert_eq!(state.get::<u32>(), None);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct AppState {
+    values: http::Extensions,
+}
+
+impl AppState {
+    /// Creates an empty state.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::project::AppState;
+    ///
+    /// let state = AppState::new();
+    /// assert_eq!(state.get::<u32>(), None);
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Inserts a value into the state.
+    ///
+    /// If the state already contained a value of the same type, it is
+    /// replaced, and the old value is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::project::AppState;
+    ///
+    /// let mut state = AppState::new();
+    /// assert_eq!(state.insert(5_u32), None);
+    /// assert_eq!(state.insert(7_u32), Some(5));
+    /// assert_eq!(state.get::<u32>(), Some(&7));
+    /// ```
+    pub fn insert<T: Clone + Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
+        self.values.insert(value)
+    }
+
+    /// Returns a reference to the value of type `T`, if there is one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::project::AppState;
+    ///
+    /// let mut state = AppState::new();
+    /// state.insert(5_u32);
+    ///
+    /// assert_eq!(state.get::<u32>(), Some(&5));
+    /// assert_eq!(state.get::<String>(), None);
+    /// ```
+    #[must_use]
+    pub fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.values.get()
+    }
+}
 
 /// A helper struct to build the root handler for the project.
 ///
@@ -1403,6 +1524,9 @@ impl Bootstrapper<WithCache> {
     )]
     #[expect(clippy::unused_async_trait_impl)]
     pub async fn boot(self) -> cot::Result<Bootstrapper<Initialized>> {
+        let mut state = AppState::new();
+        self.project.register_state(&mut state, &self.context);
+
         let router_service = RouterService::new(Arc::clone(&self.context.router));
         let handler_builder = RootHandlerBuilder {
             handler: router_service,
@@ -1411,7 +1535,7 @@ impl Bootstrapper<WithCache> {
         let handler = self.project.middlewares(handler_builder, &self.context);
 
         let auth_backend = self.project.auth_backend(&self.context);
-        let context = self.context.with_auth(auth_backend);
+        let context = self.context.with_auth_and_state(auth_backend, state);
 
         Ok(Bootstrapper {
             project: self.project,
@@ -1565,6 +1689,8 @@ pub trait BootstrapPhase: sealed::Sealed {
     type Database: Debug;
     /// The type of the auth backend.
     type AuthBackend;
+    /// The type of the application state.
+    type State: Debug;
     /// The type of the cache.
     #[cfg(feature = "cache")]
     type Cache: Debug;
@@ -1591,6 +1717,7 @@ impl BootstrapPhase for Uninitialized {
     #[cfg(feature = "db")]
     type Database = ();
     type AuthBackend = ();
+    type State = ();
     #[cfg(feature = "cache")]
     type Cache = ();
 }
@@ -1616,6 +1743,7 @@ impl BootstrapPhase for WithConfig {
     #[cfg(feature = "db")]
     type Database = ();
     type AuthBackend = ();
+    type State = ();
     #[cfg(feature = "cache")]
     type Cache = ();
 }
@@ -1641,6 +1769,7 @@ impl BootstrapPhase for WithApps {
     #[cfg(feature = "db")]
     type Database = ();
     type AuthBackend = ();
+    type State = ();
     #[cfg(feature = "cache")]
     type Cache = ();
 }
@@ -1666,6 +1795,7 @@ impl BootstrapPhase for WithDatabase {
     #[cfg(feature = "db")]
     type Database = Option<Database>;
     type AuthBackend = <WithApps as BootstrapPhase>::AuthBackend;
+    type State = ();
     #[cfg(feature = "cache")]
     type Cache = ();
 }
@@ -1691,6 +1821,7 @@ impl BootstrapPhase for WithCache {
     #[cfg(feature = "db")]
     type Database = <WithDatabase as BootstrapPhase>::Database;
     type AuthBackend = <WithApps as BootstrapPhase>::AuthBackend;
+    type State = ();
     #[cfg(feature = "cache")]
     type Cache = Cache;
 }
@@ -1716,6 +1847,7 @@ impl BootstrapPhase for Initialized {
     #[cfg(feature = "db")]
     type Database = <WithDatabase as BootstrapPhase>::Database;
     type AuthBackend = Arc<dyn AuthBackend>;
+    type State = AppState;
     #[cfg(feature = "cache")]
     type Cache = <WithCache as BootstrapPhase>::Cache;
 }
@@ -1736,6 +1868,7 @@ pub struct ProjectContext<S: BootstrapPhase = Initialized> {
     cache: S::Cache,
     #[cfg(feature = "email")]
     email: S::Email,
+    state: S::State,
 }
 
 impl ProjectContext<Uninitialized> {
@@ -1752,6 +1885,7 @@ impl ProjectContext<Uninitialized> {
             cache: (),
             #[cfg(feature = "email")]
             email: (),
+            state: (),
         }
     }
 
@@ -1774,6 +1908,7 @@ impl ProjectContext<Uninitialized> {
             cache: self.cache,
             #[cfg(feature = "email")]
             email,
+            state: self.state,
         }
     }
 }
@@ -1818,6 +1953,7 @@ impl ProjectContext<WithConfig> {
             cache: self.cache,
             #[cfg(feature = "email")]
             email: self.email,
+            state: self.state,
         }
     }
 }
@@ -1861,6 +1997,7 @@ impl ProjectContext<WithApps> {
             cache: self.cache,
             #[cfg(feature = "email")]
             email: self.email,
+            state: self.state,
         }
     }
 }
@@ -1879,13 +2016,18 @@ impl ProjectContext<WithDatabase> {
             cache,
             #[cfg(feature = "email")]
             email: self.email,
+            state: self.state,
         }
     }
 }
 
 impl ProjectContext<WithCache> {
     #[must_use]
-    fn with_auth(self, auth_backend: Arc<dyn AuthBackend>) -> ProjectContext<Initialized> {
+    fn with_auth_and_state(
+        self,
+        auth_backend: Arc<dyn AuthBackend>,
+        state: AppState,
+    ) -> ProjectContext<Initialized> {
         ProjectContext {
             config: self.config,
             apps: self.apps,
@@ -1897,6 +2039,7 @@ impl ProjectContext<WithCache> {
             cache: self.cache,
             #[cfg(feature = "email")]
             email: self.email,
+            state,
         }
     }
 }
@@ -1922,6 +2065,7 @@ impl ProjectContext<Initialized> {
             cache,
             #[cfg(feature = "email")]
             email,
+            state: AppState::new(),
         }
     }
 }
@@ -1949,6 +2093,35 @@ impl<S: BootstrapPhase<Router = Arc<Router>>> ProjectContext<S> {
     #[must_use]
     pub fn router(&self) -> &Arc<Router> {
         &self.router
+    }
+}
+
+impl<S: BootstrapPhase<State = AppState>> ProjectContext<S> {
+    /// Returns the application state for the project.
+    ///
+    /// The state is filled in [`Project::register_state`]. In request
+    /// handlers, it's usually more convenient to use the
+    /// [`State`](crate::request::extractors::State) extractor.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::request::{Request, RequestExt};
+    /// use cot::response::Response;
+    ///
+    /// #[derive(Debug, Clone)]
+    /// struct Greeting(String);
+    ///
+    /// async fn index(request: Request) -> cot::Result<Response> {
+    ///     let greeting = request.context().state().get::<Greeting>();
+    ///
+    ///     // ...
+    /// #    unimplemented!()
+    /// }
+    /// ```
+    #[must_use]
+    pub fn state(&self) -> &AppState {
+        &self.state
     }
 }
 impl<S: BootstrapPhase<AuthBackend = Arc<dyn AuthBackend>>> ProjectContext<S> {
@@ -2446,6 +2619,32 @@ mod tests {
         assert_eq!(metadata.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(metadata.authors, env!("CARGO_PKG_AUTHORS"));
         assert_eq!(metadata.description, env!("CARGO_PKG_DESCRIPTION"));
+    }
+
+    #[cot::test]
+    #[cfg_attr(
+        miri,
+        ignore = "unsupported operation: can't call foreign function `sqlite3_open_v2`"
+    )]
+    async fn bootstrapper_registers_state() {
+        #[derive(Clone)]
+        struct Greeting(&'static str);
+
+        struct StateProject;
+        impl Project for StateProject {
+            fn register_state(&self, state: &mut AppState, _context: &RegisterStateContext) {
+                state.insert(Greeting("Hello"));
+            }
+        }
+
+        let bootstrapper = Bootstrapper::new(StateProject)
+            .with_config(ProjectConfig::default())
+            .boot()
+            .await
+            .unwrap();
+
+        let greeting = bootstrapper.context().state().get::<Greeting>();
+        assert_eq!(greeting.map(|greeting| greeting.0), Some("Hello"));
     }
 
     #[cot::test]

@@ -164,6 +164,71 @@ impl FromRequestHead for crate::email::Email {
     }
 }
 
+/// An extractor that gets a value from the application state.
+///
+/// The value is registered in
+/// [`Project::register_state`](crate::Project::register_state) and is cloned
+/// out of the state for each request, so it should be cheap to clone (for
+/// example, wrapped in an [`Arc`]).
+///
+/// # Errors
+///
+/// Returns an error if no value of type `T` has been registered.
+///
+/// # Examples
+///
+/// ```
+/// use cot::Project;
+/// use cot::html::Html;
+/// use cot::project::{AppState, RegisterStateContext};
+/// use cot::request::extractors::State;
+///
+/// #[derive(Debug, Clone)]
+/// struct Greeting(String);
+///
+/// struct MyProject;
+/// impl Project for MyProject {
+///     fn register_state(&self, state: &mut AppState, _context: &RegisterStateContext) {
+///         state.insert(Greeting("Hello".to_owned()));
+///     }
+/// }
+///
+/// async fn index(State(greeting): State<Greeting>) -> Html {
+///     Html::new(format!("{} world!", greeting.0))
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct State<T>(pub T);
+
+impl<T: Clone + Send + Sync + 'static> FromRequestHead for State<T> {
+    #[expect(clippy::unused_async_trait_impl)]
+    async fn from_request_head(head: &RequestHead) -> cot::Result<Self> {
+        let value =
+            head.context()
+                .state()
+                .get::<T>()
+                .cloned()
+                .ok_or_else(|| StateNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
+
+        Ok(Self(value))
+    }
+}
+
+/// The error returned by the [`State`] extractor when the requested type is
+/// not in the application state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[error(
+    "no value of type `{type_name}` in the application state; register it in `Project::register_state`"
+)]
+#[non_exhaustive]
+pub struct StateNotRegistered {
+    /// The name of the type that was requested.
+    pub type_name: &'static str,
+}
+impl_into_cot_error!(StateNotRegistered);
+
 /// An extractor that allows you to access static files metadata (e.g., their
 /// URLs).
 ///
