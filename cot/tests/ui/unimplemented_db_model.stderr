@@ -20,4 +20,7 @@ help: the following other types implement trait `cot::db::Model`
   |
   | #[model]
   | ^^^^^^^^ `DatabaseUser`
+...
+  | #[model]
+  | ^^^^^^^^ `DatabaseUserToken`
   = note: this error originates in the attribute macro `model` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -15,14 +15,16 @@ flowchart LR
   end
   subgraph cluster2["cot"]
     n3["m_0001_initial"]
+    n4["m_0002_database<br/>user_token"]
   end
   subgraph cluster3["cot_session"]
-    n4["m_0001_initial"]
+    n5["m_0001_initial"]
   end
 
   n0 --> n1
+  n3 --> n4
 
-  class n0,n1,n2,n3,n4 migration;
+  class n0,n1,n2,n3,n4,n5 migration;
   style cluster0 fill:#f9fafb,stroke:#d1d5db,stroke-width:1px
   style cluster1 fill:#f9fafb,stroke:#d1d5db,stroke-width:1px
   style cluster2 fill:#f9fafb,stroke:#d1d5db,stroke-width:1px
