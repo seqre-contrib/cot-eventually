@@ -160,6 +160,38 @@ fn create_models_foreign_key_two_migrations() {
     assert_eq!(table_name, "cot__child");
 }
 
+/// A field with a constant as its generic argument is written to the migration
+/// as `LimitedString<{ crate::MAX_NAME_LENGTH }>`; that must not count as a
+/// change of the field.
+#[test]
+fn const_generic_field_unchanged() {
+    let generator = test_generator();
+
+    let src = include_str!("migration_generator/const_generic.rs");
+    let source_files = vec![SourceFile::parse(PathBuf::from("main.rs"), src).unwrap()];
+    let migration_file = generator
+        .generate_migrations_as_source_from_files(source_files)
+        .unwrap()
+        .unwrap();
+    assert!(
+        migration_file
+            .content
+            .contains("LimitedString<{ crate::MAX_NAME_LENGTH }>"),
+        "{}",
+        migration_file.content
+    );
+
+    let source_files = vec![
+        SourceFile::parse(PathBuf::from("main.rs"), src).unwrap(),
+        SourceFile::parse(PathBuf::from(&migration_file.name), &migration_file.content).unwrap(),
+    ];
+    let migration = generator
+        .generate_migrations_as_generated_from_files(source_files)
+        .unwrap();
+
+    assert!(migration.is_none(), "{migration:?}");
+}
+
 #[test]
 fn create_model_keywords() {
     let generator = test_generator();
