@@ -34,6 +34,34 @@ This scaffolds a migration file with `forwards` and `backwards` stubs ready to f
 
 Migrations are applied automatically whenever your project boots up, so a normal `cargo run` is all it takes. On startup, Cot creates a small internal table called `cot__migrations` (if it doesn't already exist) to keep track of which migrations have already been applied, then walks through your migrations in dependency order and applies anything new. Migrations that are already recorded as applied are skipped, so it's always safe to boot the project again after pulling in new migrations.
 
+### Before migrations are applied
+
+To do something before the schema changes, such as backing up the database, implement [`App::before_migrations`](trait@cot::App#method.before_migrations) in one of your apps. Cot calls it at startup with the list of pending migrations, before applying any of them, and only when there is something to apply. If it returns an error, the project doesn't start and no migrations are applied.
+
+```rust
+use cot::db::migrations::SyncDynMigration;
+use cot::{App, ProjectContext};
+
+struct BackupApp;
+
+#[async_trait::async_trait]
+impl App for BackupApp {
+    fn name(&self) -> &str {
+        "backup"
+    }
+
+    async fn before_migrations(
+        &self,
+        context: &ProjectContext,
+        pending: &[&SyncDynMigration],
+    ) -> cot::Result<()> {
+        println!("{} migrations to apply, backing up the database", pending.len());
+        // ...
+        Ok(())
+    }
+}
+```
+
 ## Listing migrations
 
 To see what migrations exist across your project, run:
