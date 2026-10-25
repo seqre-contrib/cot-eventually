@@ -98,6 +98,8 @@ let request = http::Request::get("/").body(Body::empty()).unwrap();
 let response = client.request(request).await?;
 ```
 
+The client uses your project's `test` configuration and starts the project just like when it is run: if the configuration has a database, the migrations of all registered apps are applied to it, and then each app's [`init`](trait@cot::App#method.init) is called. With an in-memory SQLite database (`sqlite::memory:`), each client starts with a fresh database.
+
 #### When to Use `Client`
 
 - **Full Application Testing**: Confirm that routes, middlewares, and database integrations all work as intended.
