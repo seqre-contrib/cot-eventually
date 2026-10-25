@@ -487,6 +487,27 @@ pub struct DatabaseConfig {
     /// ```
     #[builder(setter(into, strip_option), default)]
     pub url: Option<DatabaseUrl>,
+
+    /// Options for SQLite connections, used when the URL points to an SQLite
+    /// database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::config::{DatabaseConfig, SqliteConfig, SqliteJournalMode};
+    ///
+    /// let config = DatabaseConfig::builder()
+    ///     .url("sqlite://db.sqlite3?mode=rwc")
+    ///     .sqlite(
+    ///         SqliteConfig::builder()
+    ///             .journal_mode(SqliteJournalMode::Wal)
+    ///             .build(),
+    ///     )
+    ///     .build();
+    /// assert_eq!(config.sqlite.journal_mode, Some(SqliteJournalMode::Wal));
+    /// ```
+    #[builder(default)]
+    pub sqlite: SqliteConfig,
 }
 
 #[cfg(feature = "db")]
@@ -508,6 +529,7 @@ impl DatabaseConfigBuilder {
     pub fn build(&self) -> DatabaseConfig {
         DatabaseConfig {
             url: self.url.clone().expect("Database URL is required"),
+            sqlite: self.sqlite.clone().unwrap_or_default(),
         }
     }
 }
@@ -527,6 +549,215 @@ impl DatabaseConfig {
     pub fn builder() -> DatabaseConfigBuilder {
         DatabaseConfigBuilder::default()
     }
+}
+
+/// Options for SQLite database connections.
+///
+/// It is used as part of the [`DatabaseConfig`] struct. The options are
+/// applied to every connection Cot opens to an SQLite database. An option that
+/// isn't set keeps SQLite's (or the database file's) current setting.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use cot::config::{SqliteConfig, SqliteJournalMode, SqliteSynchronous};
+///
+/// let config = SqliteConfig::builder()
+///     .journal_mode(SqliteJournalMode::Wal)
+///     .synchronous(SqliteSynchronous::Normal)
+///     .busy_timeout(Duration::from_secs(10))
+///     .build();
+/// ```
+#[cfg(feature = "db")]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Builder, Serialize, Deserialize)]
+#[cfg_attr(feature = "_internal_config-docs", derive(schemars::JsonSchema))]
+#[builder(build_fn(skip, error = std::convert::Infallible))]
+#[serde(default)]
+#[non_exhaustive]
+pub struct SqliteConfig {
+    /// The [journal mode](https://www.sqlite.org/pragma.html#pragma_journal_mode)
+    /// of the database.
+    ///
+    /// The journal mode is stored in the database file once it's set to
+    /// `wal`, so it applies to every later connection, too.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::config::{ProjectConfig, SqliteJournalMode};
+    ///
+    /// let config = ProjectConfig::from_toml(
+    ///     r#"
+    /// [database]
+    /// url = "sqlite://db.sqlite3?mode=rwc"
+    /// sqlite.journal_mode = "wal"
+    /// "#,
+    /// )?;
+    ///
+    /// assert_eq!(
+    ///     config.database.sqlite.journal_mode,
+    ///     Some(SqliteJournalMode::Wal)
+    /// );
+    /// # Ok::<(), cot::Error>(())
+    /// ```
+    #[builder(setter(strip_option), default)]
+    pub journal_mode: Option<SqliteJournalMode>,
+
+    /// The [synchronous](https://www.sqlite.org/pragma.html#pragma_synchronous)
+    /// setting of each connection.
+    ///
+    /// `normal` is a common choice together with the `wal` journal mode: it
+    /// is faster than SQLite's default, `full`, and still keeps the database
+    /// consistent after a power loss.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::config::{ProjectConfig, SqliteSynchronous};
+    ///
+    /// let config = ProjectConfig::from_toml(
+    ///     r#"
+    /// [database]
+    /// url = "sqlite://db.sqlite3?mode=rwc"
+    /// sqlite.synchronous = "normal"
+    /// "#,
+    /// )?;
+    ///
+    /// assert_eq!(
+    ///     config.database.sqlite.synchronous,
+    ///     Some(SqliteSynchronous::Normal)
+    /// );
+    /// # Ok::<(), cot::Error>(())
+    /// ```
+    #[builder(setter(strip_option), default)]
+    pub synchronous: Option<SqliteSynchronous>,
+
+    /// How long a connection waits for a lock on the database before it
+    /// gives up with a "database is locked" error. When not set, it is 5
+    /// seconds.
+    ///
+    /// # TOML
+    ///
+    /// This field is serialized as a "human-readable" duration, like `10s`,
+    /// `1m`, etc. Please refer to the [`humantime::parse_duration`]
+    /// documentation for the supported formats for this field.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use cot::config::ProjectConfig;
+    ///
+    /// let config = ProjectConfig::from_toml(
+    ///     r#"
+    /// [database]
+    /// url = "sqlite://db.sqlite3?mode=rwc"
+    /// sqlite.busy_timeout = "10s"
+    /// "#,
+    /// )?;
+    ///
+    /// assert_eq!(
+    ///     config.database.sqlite.busy_timeout,
+    ///     Some(Duration::from_secs(10))
+    /// );
+    /// # Ok::<(), cot::Error>(())
+    /// ```
+    #[serde(with = "crate::serializers::humantime")]
+    #[cfg_attr(feature = "_internal_config-docs", schemars(with = "Option<String>"))]
+    #[builder(setter(strip_option), default)]
+    pub busy_timeout: Option<Duration>,
+}
+
+#[cfg(feature = "db")]
+impl SqliteConfigBuilder {
+    /// Builds the SQLite configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::config::SqliteConfig;
+    ///
+    /// let config = SqliteConfig::builder().build();
+    /// assert_eq!(config, SqliteConfig::default());
+    /// ```
+    #[must_use]
+    pub fn build(&self) -> SqliteConfig {
+        SqliteConfig {
+            journal_mode: self.journal_mode.unwrap_or_default(),
+            synchronous: self.synchronous.unwrap_or_default(),
+            busy_timeout: self.busy_timeout.unwrap_or_default(),
+        }
+    }
+}
+
+#[cfg(feature = "db")]
+impl SqliteConfig {
+    /// Create a new [`SqliteConfigBuilder`] to build a [`SqliteConfig`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::config::SqliteConfig;
+    ///
+    /// let config = SqliteConfig::builder().build();
+    /// ```
+    #[must_use]
+    pub fn builder() -> SqliteConfigBuilder {
+        SqliteConfigBuilder::default()
+    }
+}
+
+/// The [journal mode](https://www.sqlite.org/pragma.html#pragma_journal_mode)
+/// of an SQLite database.
+///
+/// It is used as part of the [`SqliteConfig`] struct.
+#[cfg(feature = "db")]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "_internal_config-docs", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SqliteJournalMode {
+    /// The rollback journal is deleted at the end of each transaction. This is
+    /// SQLite's default.
+    Delete,
+    /// The rollback journal is truncated to zero length at the end of each
+    /// transaction.
+    Truncate,
+    /// The rollback journal's header is overwritten with zeros at the end of
+    /// each transaction.
+    Persist,
+    /// The rollback journal is kept in memory.
+    Memory,
+    /// A write-ahead log is used instead of a rollback journal, so readers
+    /// and a writer can work at the same time.
+    Wal,
+    /// No rollback journal at all; transactions can't be rolled back safely.
+    Off,
+}
+
+/// The [synchronous](https://www.sqlite.org/pragma.html#pragma_synchronous)
+/// setting of an SQLite connection.
+///
+/// It is used as part of the [`SqliteConfig`] struct.
+#[cfg(feature = "db")]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "_internal_config-docs", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SqliteSynchronous {
+    /// SQLite doesn't wait for data to reach the disk.
+    Off,
+    /// SQLite waits for data to reach the disk at the most critical moments.
+    Normal,
+    /// SQLite waits for data to reach the disk before each transaction
+    /// completes. This is SQLite's default.
+    Full,
+    /// Like `full`, and the directory is synced after a rollback journal is
+    /// deleted, too.
+    Extra,
 }
 
 /// Expiration policy for cached values.

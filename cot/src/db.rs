@@ -2177,6 +2177,66 @@ impl Database {
         panic!("Unsupported database URL: {url}");
     }
 
+    /// Creates a new database connection from the database configuration.
+    ///
+    /// Unlike [`Database::new`], this also applies the database-specific
+    /// options from the configuration, such as [`DatabaseConfig::sqlite`].
+    /// This is what Cot uses to connect to the database configured for a
+    /// project.
+    ///
+    /// # Errors
+    ///
+    /// This method can return an error if the connection to the database could
+    /// not be established.
+    ///
+    /// This method can return an error if the database URL is invalid.
+    ///
+    /// # Panics
+    ///
+    /// This method will panic if the database URL is not set or not
+    /// supported.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::config::{DatabaseConfig, SqliteConfig, SqliteSynchronous};
+    /// use cot::db::Database;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> cot::Result<()> {
+    /// let config = DatabaseConfig::builder()
+    ///     .url("sqlite::memory:")
+    ///     .sqlite(
+    ///         SqliteConfig::builder()
+    ///             .synchronous(SqliteSynchronous::Normal)
+    ///             .build(),
+    ///     )
+    ///     .build();
+    /// let db = Database::from_config(&config).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`DatabaseConfig::sqlite`]: crate::config::DatabaseConfig::sqlite
+    pub async fn from_config(config: &crate::config::DatabaseConfig) -> Result<Self> {
+        let url = config
+            .url
+            .as_ref()
+            .expect("database URL should be set")
+            .as_str();
+
+        #[cfg(feature = "sqlite")]
+        if url.starts_with("sqlite:") {
+            let inner = DatabaseSqlite::with_config(url, &config.sqlite).await?;
+            return Ok(Self {
+                inner: Arc::new(DatabaseImpl::Sqlite(inner)),
+                context: DatabaseContext::Default,
+            });
+        }
+
+        Self::new(url).await
+    }
+
     fn for_migration(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),

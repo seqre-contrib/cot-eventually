@@ -14,6 +14,15 @@ impl_sea_query_db_backend!(DatabaseSqlite: sqlx::sqlite::Sqlite, sqlx::sqlite::S
 impl_sea_query_transaction_backend!(DatabaseSqlite, TransactionSqlite: sqlx::sqlite::Sqlite, SqliteRow, sea_query::SqliteQueryBuilder);
 
 impl DatabaseSqlite {
+    pub(super) async fn with_config(
+        url: &str,
+        config: &crate::config::SqliteConfig,
+    ) -> crate::db::Result<Self> {
+        let options = connect_options(url, config)?;
+        let db_connection = sqlx::sqlite::SqlitePool::connect_with(options).await?;
+        Self::from_pool(db_connection).await
+    }
+
     async fn init(&self) -> crate::db::Result<()> {
         self.raw("PRAGMA foreign_keys = ON").await?;
         Ok(())
@@ -41,6 +50,39 @@ impl DatabaseSqlite {
     ) -> sea_query::ColumnType {
         sea_query::ColumnType::from(column_type)
     }
+}
+
+fn connect_options(
+    url: &str,
+    config: &crate::config::SqliteConfig,
+) -> crate::db::Result<sqlx::sqlite::SqliteConnectOptions> {
+    use std::str::FromStr;
+
+    use crate::config::{SqliteJournalMode, SqliteSynchronous};
+
+    let mut options = sqlx::sqlite::SqliteConnectOptions::from_str(url)?;
+    if let Some(journal_mode) = config.journal_mode {
+        options = options.journal_mode(match journal_mode {
+            SqliteJournalMode::Delete => sqlx::sqlite::SqliteJournalMode::Delete,
+            SqliteJournalMode::Truncate => sqlx::sqlite::SqliteJournalMode::Truncate,
+            SqliteJournalMode::Persist => sqlx::sqlite::SqliteJournalMode::Persist,
+            SqliteJournalMode::Memory => sqlx::sqlite::SqliteJournalMode::Memory,
+            SqliteJournalMode::Wal => sqlx::sqlite::SqliteJournalMode::Wal,
+            SqliteJournalMode::Off => sqlx::sqlite::SqliteJournalMode::Off,
+        });
+    }
+    if let Some(synchronous) = config.synchronous {
+        options = options.synchronous(match synchronous {
+            SqliteSynchronous::Off => sqlx::sqlite::SqliteSynchronous::Off,
+            SqliteSynchronous::Normal => sqlx::sqlite::SqliteSynchronous::Normal,
+            SqliteSynchronous::Full => sqlx::sqlite::SqliteSynchronous::Full,
+            SqliteSynchronous::Extra => sqlx::sqlite::SqliteSynchronous::Extra,
+        });
+    }
+    if let Some(busy_timeout) = config.busy_timeout {
+        options = options.busy_timeout(busy_timeout);
+    }
+    Ok(options)
 }
 
 impl LikeExprBuilder for DatabaseSqlite {
@@ -111,6 +153,52 @@ mod tests {
 
     use super::*;
     use crate::test::TestDatabase;
+
+    #[tokio::test]
+    #[cfg_attr(
+        miri,
+        ignore = "unsupported operation: can't call foreign function `sqlite3_open_v2`"
+    )]
+    async fn with_config_sets_connection_options() {
+        use std::time::Duration;
+
+        use crate::config::{SqliteConfig, SqliteJournalMode, SqliteSynchronous};
+
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("db.sqlite3").display()
+        );
+        let config = SqliteConfig::builder()
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(10))
+            .build();
+
+        let db = DatabaseSqlite::with_config(&url, &config).await.unwrap();
+
+        // every connection in the pool gets the options, not just the first one
+        let mut first = db.db_connection.acquire().await.unwrap();
+        let mut second = db.db_connection.acquire().await.unwrap();
+        for connection in [&mut first, &mut second] {
+            let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+
+            assert_eq!(journal_mode, "wal");
+            assert_eq!(synchronous, 1); // NORMAL
+            assert_eq!(busy_timeout, 10_000);
+        }
+    }
 
     #[test]
     fn test_to_sqlite_glob() {
