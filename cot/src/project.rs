@@ -2112,6 +2112,36 @@ pub async fn run_at(
     run_at_with_shutdown(bootstrapper, listener, shutdown_signal()).await
 }
 
+/// Applies the migrations of every registered app that haven't been applied
+/// to the project's database yet. Does nothing if no database is configured.
+#[cfg(feature = "db")]
+pub(crate) async fn apply_migrations(context: &ProjectContext) -> cot::Result<()> {
+    if let Some(database) = &context.database {
+        let mut migrations: Vec<Box<SyncDynMigration>> = Vec::new();
+        for app in &context.apps {
+            migrations.extend(app.migrations());
+        }
+        let migration_engine = MigrationEngine::new(migrations)?;
+        migration_engine.run(database).await?;
+    }
+
+    Ok(())
+}
+
+/// Calls [`App::init`] of every registered app, in the order they were
+/// registered.
+pub(crate) async fn initialize_apps(context: &mut ProjectContext) -> cot::Result<()> {
+    let mut apps = std::mem::take(&mut context.apps);
+    for app in &mut apps {
+        info!("Initializing app: {}", app.name());
+
+        app.init(context).await?;
+    }
+    context.apps = apps;
+
+    Ok(())
+}
+
 /// Runs the Cot project on the given listener.
 ///
 /// This function takes a Cot project and a [`tokio::net::TcpListener`] and
@@ -2137,22 +2167,9 @@ pub async fn run_at_with_shutdown(
     } = bootstrapper.finish();
 
     #[cfg(feature = "db")]
-    if let Some(database) = &context.database {
-        let mut migrations: Vec<Box<SyncDynMigration>> = Vec::new();
-        for app in &context.apps {
-            migrations.extend(app.migrations());
-        }
-        let migration_engine = MigrationEngine::new(migrations)?;
-        migration_engine.run(database).await?;
-    }
+    apply_migrations(&context).await?;
 
-    let mut apps = std::mem::take(&mut context.apps);
-    for app in &mut apps {
-        info!("Initializing app: {}", app.name());
-
-        app.init(&mut context).await?;
-    }
-    context.apps = apps;
+    initialize_apps(&mut context).await?;
 
     let context = Arc::new(context);
     let is_debug = context.config().debug;
