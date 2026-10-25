@@ -131,6 +131,37 @@ impl Client {
         }
     }
 
+    /// Returns the context of the project the client runs.
+    ///
+    /// This gives tests access to the project's database, configuration and
+    /// so on, for instance to check what a request has stored.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::Project;
+    /// use cot::config::ProjectConfig;
+    /// use cot::test::Client;
+    ///
+    /// struct MyProject;
+    /// impl Project for MyProject {
+    ///     fn config(&self, config_name: &str) -> cot::Result<ProjectConfig> {
+    ///         Ok(ProjectConfig::default())
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> cot::Result<()> {
+    /// let client = Client::new(MyProject).await;
+    /// assert!(client.context().config().debug);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn context(&self) -> &ProjectContext {
+        &self.context
+    }
+
     /// Sends a GET request to the specified path.
     ///
     /// # Errors

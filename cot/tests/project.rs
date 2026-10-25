@@ -195,4 +195,10 @@ async fn client_applies_migrations_and_initializes_apps() {
         response.into_body().into_bytes().await.unwrap(),
         Bytes::from("bob")
     );
+
+    // the test can look at the database, too
+    let user = DatabaseUser::get_by_username(client.context().database(), "alice")
+        .await
+        .unwrap();
+    assert!(user.is_some());
 }
