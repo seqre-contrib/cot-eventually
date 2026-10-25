@@ -67,10 +67,20 @@ pub struct Client {
 impl Client {
     /// Create a new test client for a Cot project.
     ///
+    /// The project is booted with its `test` configuration and started the
+    /// way it is when it's run: if the configuration has a database, the
+    /// migrations of all registered apps are applied to it, so the tests start
+    /// with an up-to-date schema, and then each app's
+    /// [`App::init`](crate::App::init) is called. Using an in-memory SQLite
+    /// database (such as `sqlite::memory:`) gives every client a fresh, empty
+    /// database.
+    ///
     /// # Panics
     ///
     /// Panics if the test configuration could not be loaded.
     /// Panics if the project could not be initialized.
+    /// Panics if the migrations could not be applied.
+    /// Panics if an app could not be initialized.
     ///
     /// # Examples
     ///
@@ -106,12 +116,50 @@ impl Client {
             .await
             .expect("Could not boot project");
 
-        let bootstrapped_project = bootstrapper.finish();
+        let mut bootstrapped_project = bootstrapper.finish();
+        #[cfg(feature = "db")]
+        crate::project::apply_migrations(&bootstrapped_project.context)
+            .await
+            .expect("Could not apply migrations");
+        crate::project::initialize_apps(&mut bootstrapped_project.context)
+            .await
+            .expect("Could not initialize the apps");
         Self {
             context: Arc::new(bootstrapped_project.context),
             handler: bootstrapped_project.handler,
             error_handler: bootstrapped_project.error_handler,
         }
+    }
+
+    /// Returns the context of the project the client runs.
+    ///
+    /// This gives tests access to the project's database, configuration and
+    /// so on, for instance to check what a request has stored.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::Project;
+    /// use cot::config::ProjectConfig;
+    /// use cot::test::Client;
+    ///
+    /// struct MyProject;
+    /// impl Project for MyProject {
+    ///     fn config(&self, config_name: &str) -> cot::Result<ProjectConfig> {
+    ///         Ok(ProjectConfig::default())
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> cot::Result<()> {
+    /// let client = Client::new(MyProject).await;
+    /// assert!(client.context().config().debug);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn context(&self) -> &ProjectContext {
+        &self.context
     }
 
     /// Sends a GET request to the specified path.
