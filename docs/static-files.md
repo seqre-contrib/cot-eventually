@@ -39,6 +39,27 @@ impl App for MyApp {
 }
 ```
 
+Instead of listing every file, you can also give the macro a directory. It then includes every file in that directory and its subdirectories, each one keeping its path relative to the `static` directory. For example, to register everything in `static/css` and `static/images`:
+
+```rust
+# struct MyApp;
+impl App for MyApp {
+#   fn name(&self) -> &str { "test" }
+    fn static_files(&self) -> Vec<StaticFile> {
+        static_files!("css", "images")
+    }
+}
+```
+
+The files are embedded in the binary when it is compiled. Cargo rebuilds your crate when one of them changes, but it can't tell when a file is added to or removed from a directory you registered. To make it rebuild in that case too, add a [build script](https://doc.rust-lang.org/cargo/reference/build-scripts.html) that watches the `static` directory:
+
+```rust,ignore
+// build.rs
+fn main() {
+    println!("cargo::rerun-if-changed=static");
+}
+```
+
 You can get the URL for a static file using the `StaticFiles` extractor. For example, to get the URL for the logo:
 
 ```rust

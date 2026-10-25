@@ -185,6 +185,65 @@ pub use cot_macros::e2e_test;
 /// }
 /// ```
 pub use cot_macros::main;
+/// Defines static files by their paths, embedding them in the binary.
+///
+/// The paths are relative to the `static` directory of the crate (next to its
+/// `Cargo.toml` file), and the files are embedded at compile time using the
+/// `include_bytes!` macro. A path can name a single file or a directory. A
+/// directory includes every file in it and its subdirectories, sorted by
+/// path. Each file keeps its path relative to the `static` directory, which
+/// is also the path it is served at, under the static files URL prefix.
+///
+/// This is mainly useful with the
+/// [`App::static_files`](crate::App::static_files) trait method.
+///
+/// # Rebuilding when files are added or removed
+///
+/// Cargo rebuilds the crate when an embedded file changes, but it can't tell
+/// when a file is added to or removed from an embedded directory. To pick up
+/// such changes, add a [build script] that tells Cargo to watch the `static`
+/// directory:
+///
+/// ```ignore
+/// // build.rs
+/// fn main() {
+///     println!("cargo::rerun-if-changed=static");
+/// }
+/// ```
+///
+/// [build script]: https://doc.rust-lang.org/cargo/reference/build-scripts.html
+///
+/// # Examples
+///
+/// ```
+/// use cot::static_files::StaticFile;
+/// use cot::{App, static_files};
+///
+/// pub struct ExampleApp;
+///
+/// // Project structure:
+/// // .
+/// // ├── Cargo.toml
+/// // └── static
+/// //     └── test
+/// //         ├── test.txt
+/// //         └── dir
+/// //             ├── a.txt
+/// //             └── nested
+/// //                 └── b.css
+///
+/// impl App for ExampleApp {
+///     fn name(&self) -> &str {
+///         "test_app"
+///     }
+///
+///     fn static_files(&self) -> Vec<StaticFile> {
+///         // a single file, and every file in the `test/dir` directory
+///         static_files!("test/test.txt", "test/dir")
+///     }
+/// }
+/// ```
+pub use cot_macros::static_files;
 pub use cot_macros::test;
 pub use http;
 #[cfg(feature = "openapi")]
