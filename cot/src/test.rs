@@ -114,6 +114,44 @@ impl Client {
         }
     }
 
+    /// Runs the project's background tasks that are due at the current time
+    /// of the project's [`Clock`](crate::tasks::Clock), and returns how many
+    /// runs there were.
+    ///
+    /// The test client doesn't run tasks on its own. Together with a clock
+    /// the test controls, set with [`Project::clock`], this runs scheduled
+    /// tasks at the moment the test chooses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task backend fails. Errors of the tasks
+    /// themselves are logged, like in a running project.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::Project;
+    /// use cot::config::ProjectConfig;
+    /// use cot::test::Client;
+    ///
+    /// struct MyProject;
+    /// impl Project for MyProject {
+    ///     fn config(&self, config_name: &str) -> cot::Result<ProjectConfig> {
+    ///         Ok(ProjectConfig::default())
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> cot::Result<()> {
+    /// let mut client = Client::new(MyProject).await;
+    /// assert_eq!(client.run_due_tasks().await?, 0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn run_due_tasks(&mut self) -> Result<usize> {
+        self.context.tasks().run_due(&self.context).await
+    }
+
     /// Sends a GET request to the specified path.
     ///
     /// # Errors
