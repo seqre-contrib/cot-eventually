@@ -216,7 +216,9 @@ use crate::common_types::Url;
 use crate::db::Auto;
 use crate::form::Form;
 use crate::json::Json;
-use crate::request::extractors::{FromRequest, FromRequestHead, Path, RequestForm, UrlQuery};
+use crate::request::extractors::{
+    FromRequest, FromRequestHead, Path, RequestForm, State, UrlQuery,
+};
 use crate::request::{Request, RequestHead};
 use crate::response::{Response, WithExtension};
 use crate::router::Urls;
@@ -848,6 +850,7 @@ impl ApiOperationPart for Urls {}
 impl ApiOperationPart for Method {}
 impl ApiOperationPart for Session {}
 impl ApiOperationPart for Auth {}
+impl<T> ApiOperationPart for State<T> {}
 #[cfg(feature = "db")]
 impl ApiOperationPart for crate::db::Database {}
 
