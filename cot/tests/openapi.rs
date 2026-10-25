@@ -2,7 +2,7 @@ use aide::openapi::{Parameter, PathItem, ReferenceOr};
 use cot::html::Html;
 use cot::json::Json;
 use cot::openapi::{AsApiRoute, NoApi, RouteContext};
-use cot::request::extractors::{Path, UrlQuery};
+use cot::request::extractors::{Path, State, UrlQuery};
 use cot::response::{IntoResponse, Response};
 use cot::router::method::openapi::{ApiMethodRouter, api_get, api_post};
 use cot::router::{Route, Router};
@@ -258,4 +258,40 @@ async fn no_api_in_params() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().into_bytes().await.unwrap();
     assert_eq!(body, "Got: 123, test, 42");
+}
+
+#[test]
+#[expect(
+    clippy::assert_is_empty,
+    reason = "`is_empty` states the intent more directly than comparing to `[]`"
+)]
+fn state_adds_no_api_parameters() {
+    #[derive(Debug, Clone)]
+    struct Greeting(&'static str);
+
+    async fn state_handler(State(greeting): State<Greeting>) -> cot::Result<Response> {
+        Html::new(greeting.0).into_response()
+    }
+
+    let router = Router::with_urls([Route::with_api_handler("/state", api_get(state_handler))]);
+
+    let aide::openapi::OpenApi {
+        paths: Some(aide::openapi::Paths {
+            paths: api_spec, ..
+        }),
+        ..
+    } = router.as_api()
+    else {
+        panic!("Expected OpenAPI data");
+    };
+
+    let Some(ReferenceOr::Item(PathItem {
+        get: Some(operation),
+        ..
+    })) = api_spec.get("/state")
+    else {
+        panic!("Expected a GET operation at /state");
+    };
+    assert!(operation.parameters.is_empty());
+    assert!(operation.request_body.is_none());
 }
