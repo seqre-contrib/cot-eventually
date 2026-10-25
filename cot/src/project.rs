@@ -71,6 +71,9 @@ use crate::request::{Request, RequestExt, RequestHead};
 use crate::response::{IntoResponse, Response};
 use crate::router::{Route, Router, RouterService};
 use crate::static_files::StaticFile;
+use crate::tasks::{
+    Clock, MemoryTaskBackend, ScheduledTask, SystemClock, TaskBackend, TaskRunner, Worker,
+};
 use crate::utils::accept_header_parser::AcceptHeaderParser;
 use crate::{Body, Error, cli, error_page};
 
@@ -216,6 +219,18 @@ pub trait App: Send + Sync {
     /// Returns a list of static files that the app serves. By default, it
     /// returns an empty list.
     fn static_files(&self) -> Vec<StaticFile> {
+        vec![]
+    }
+
+    /// Returns the tasks that the app runs at given times. By default, it
+    /// returns an empty list.
+    ///
+    /// When the project is running, each task runs whenever its schedule is
+    /// due. See the [`tasks`](crate::tasks) module for details and an example.
+    ///
+    /// The names of the tasks of all apps must be unique; the project panics
+    /// at startup otherwise.
+    fn scheduled_tasks(&self) -> Vec<ScheduledTask> {
         vec![]
     }
 }
@@ -453,6 +468,60 @@ pub trait Project {
         }
     }
 
+    /// Returns the clock the project's background tasks are checked against.
+    ///
+    /// By default, this is the [`SystemClock`]. A project can return a
+    /// different clock, for instance one that tests can move forward to run
+    /// scheduled tasks without waiting for them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use cot::Project;
+    /// use cot::tasks::{Clock, SystemClock};
+    ///
+    /// struct MyProject {
+    ///     clock: Arc<dyn Clock>,
+    /// }
+    ///
+    /// impl Project for MyProject {
+    ///     fn clock(&self) -> Arc<dyn Clock> {
+    ///         Arc::clone(&self.clock)
+    ///     }
+    /// }
+    /// ```
+    fn clock(&self) -> Arc<dyn Clock> {
+        Arc::new(SystemClock)
+    }
+
+    /// Returns the backend that keeps the runs of the project's background
+    /// tasks.
+    ///
+    /// By default, this is a [`MemoryTaskBackend`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use cot::Project;
+    /// use cot::project::TaskBackendContext;
+    /// use cot::tasks::{MemoryTaskBackend, TaskBackend};
+    ///
+    /// struct MyProject;
+    /// impl Project for MyProject {
+    ///     fn task_backend(&self, context: &TaskBackendContext) -> Arc<dyn TaskBackend> {
+    ///         Arc::new(MemoryTaskBackend::new())
+    ///     }
+    /// }
+    /// ```
+    #[expect(unused_variables)]
+    fn task_backend(&self, context: &TaskBackendContext) -> Arc<dyn TaskBackend> {
+        Arc::new(MemoryTaskBackend::new())
+    }
+
     /// Returns the middlewares for the project.
     ///
     /// This method is used to return the middlewares for the project. The
@@ -623,6 +692,10 @@ impl AppState {
         self.values.get()
     }
 }
+
+/// An alias for `ProjectContext` in appropriate phase for use with the
+/// [`Project::task_backend`] method.
+pub type TaskBackendContext = ProjectContext<WithCache>;
 
 /// A helper struct to build the root handler for the project.
 ///
@@ -1573,11 +1646,6 @@ impl Bootstrapper<WithCache> {
     /// # Ok(())
     /// # }
     /// ```
-    #[expect(
-        clippy::unused_async,
-        reason = "for consistency with other Bootstrapper::boot methods"
-    )]
-    #[expect(clippy::unused_async_trait_impl)]
     pub async fn boot(self) -> cot::Result<Bootstrapper<Initialized>> {
         let mut state = AppState::new();
         self.project.register_state(&mut state, &self.context);
@@ -1590,7 +1658,19 @@ impl Bootstrapper<WithCache> {
         let handler = self.project.middlewares(handler_builder, &self.context);
 
         let auth_backend = self.project.auth_backend(&self.context);
-        let context = self.context.with_auth_and_state(auth_backend, state);
+        let scheduled_tasks = self
+            .context
+            .apps
+            .iter()
+            .flat_map(|app| app.scheduled_tasks())
+            .collect();
+        let tasks = TaskRunner::new(
+            self.project.clock(),
+            self.project.task_backend(&self.context),
+            scheduled_tasks,
+        )
+        .await?;
+        let context = self.context.with_auth_and_state(auth_backend, state, tasks);
 
         Ok(Bootstrapper {
             project: self.project,
@@ -1749,6 +1829,8 @@ pub trait BootstrapPhase: sealed::Sealed {
     /// The type of the cache.
     #[cfg(feature = "cache")]
     type Cache: Debug;
+    /// The type of the background task runner.
+    type Tasks: Debug;
 }
 
 /// First phase of bootstrapping a Cot project, the uninitialized phase.
@@ -1775,6 +1857,7 @@ impl BootstrapPhase for Uninitialized {
     type State = ();
     #[cfg(feature = "cache")]
     type Cache = ();
+    type Tasks = ();
 }
 
 /// Second phase of bootstrapping a Cot project, the with-config phase.
@@ -1801,6 +1884,7 @@ impl BootstrapPhase for WithConfig {
     type State = ();
     #[cfg(feature = "cache")]
     type Cache = ();
+    type Tasks = ();
 }
 
 /// Third phase of bootstrapping a Cot project, the with-apps phase.
@@ -1827,6 +1911,7 @@ impl BootstrapPhase for WithApps {
     type State = ();
     #[cfg(feature = "cache")]
     type Cache = ();
+    type Tasks = ();
 }
 
 /// Fourth phase of bootstrapping a Cot project, the with-database phase.
@@ -1853,6 +1938,7 @@ impl BootstrapPhase for WithDatabase {
     type State = ();
     #[cfg(feature = "cache")]
     type Cache = ();
+    type Tasks = ();
 }
 
 /// Fifth phase of bootstrapping a Cot project, the with-cache phase.
@@ -1879,6 +1965,7 @@ impl BootstrapPhase for WithCache {
     type State = ();
     #[cfg(feature = "cache")]
     type Cache = Cache;
+    type Tasks = ();
 }
 
 /// The final phase of bootstrapping a Cot project, the initialized phase.
@@ -1905,6 +1992,7 @@ impl BootstrapPhase for Initialized {
     type State = AppState;
     #[cfg(feature = "cache")]
     type Cache = <WithCache as BootstrapPhase>::Cache;
+    type Tasks = TaskRunner;
 }
 
 /// Shared context and configs for all apps. Used in conjunction with the
@@ -1924,6 +2012,7 @@ pub struct ProjectContext<S: BootstrapPhase = Initialized> {
     #[cfg(feature = "email")]
     email: S::Email,
     state: S::State,
+    tasks: S::Tasks,
 }
 
 impl ProjectContext<Uninitialized> {
@@ -1936,6 +2025,7 @@ impl ProjectContext<Uninitialized> {
             #[cfg(feature = "db")]
             database: (),
             auth_backend: (),
+            tasks: (),
             #[cfg(feature = "cache")]
             cache: (),
             #[cfg(feature = "email")]
@@ -1959,6 +2049,7 @@ impl ProjectContext<Uninitialized> {
             #[cfg(feature = "db")]
             database: self.database,
             auth_backend: self.auth_backend,
+            tasks: self.tasks,
             #[cfg(feature = "cache")]
             cache: self.cache,
             #[cfg(feature = "email")]
@@ -2004,6 +2095,7 @@ impl ProjectContext<WithConfig> {
             #[cfg(feature = "db")]
             database: self.database,
             auth_backend: self.auth_backend,
+            tasks: self.tasks,
             #[cfg(feature = "cache")]
             cache: self.cache,
             #[cfg(feature = "email")]
@@ -2048,6 +2140,7 @@ impl ProjectContext<WithApps> {
             #[cfg(feature = "db")]
             database,
             auth_backend: self.auth_backend,
+            tasks: self.tasks,
             #[cfg(feature = "cache")]
             cache: self.cache,
             #[cfg(feature = "email")]
@@ -2065,6 +2158,7 @@ impl ProjectContext<WithDatabase> {
             apps: self.apps,
             router: self.router,
             auth_backend: self.auth_backend,
+            tasks: self.tasks,
             #[cfg(feature = "db")]
             database: self.database,
             #[cfg(feature = "cache")]
@@ -2082,12 +2176,14 @@ impl ProjectContext<WithCache> {
         self,
         auth_backend: Arc<dyn AuthBackend>,
         state: AppState,
+        tasks: TaskRunner,
     ) -> ProjectContext<Initialized> {
         ProjectContext {
             config: self.config,
             apps: self.apps,
             router: self.router,
             auth_backend,
+            tasks,
             #[cfg(feature = "db")]
             database: self.database,
             #[cfg(feature = "cache")]
@@ -2121,6 +2217,7 @@ impl ProjectContext<Initialized> {
             #[cfg(feature = "email")]
             email,
             state: AppState::new(),
+            tasks: TaskRunner::empty(),
         }
     }
 }
@@ -2197,6 +2294,27 @@ impl<S: BootstrapPhase<AuthBackend = Arc<dyn AuthBackend>>> ProjectContext<S> {
     #[must_use]
     pub fn auth_backend(&self) -> &Arc<dyn AuthBackend> {
         &self.auth_backend
+    }
+}
+
+impl<S: BootstrapPhase<Tasks = TaskRunner>> ProjectContext<S> {
+    /// Returns the runner of the project's background tasks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::request::{Request, RequestExt};
+    /// use cot::response::Response;
+    ///
+    /// async fn index(request: Request) -> cot::Result<Response> {
+    ///     let now = request.context().tasks().clock().now();
+    ///     // ...
+    /// #    unimplemented!()
+    /// }
+    /// ```
+    #[must_use]
+    pub fn tasks(&self) -> &TaskRunner {
+        &self.tasks
     }
 }
 
@@ -2403,6 +2521,7 @@ pub async fn run_at_with_shutdown(
     initialize_apps(&mut context).await?;
 
     let context = Arc::new(context);
+    let worker = Worker::start(Arc::clone(&context));
     let is_debug = context.config().debug;
     let register_panic_hook = context.config().register_panic_hook;
     #[cfg(feature = "db")]
@@ -2465,6 +2584,7 @@ pub async fn run_at_with_shutdown(
         std::panic::set_hook(Box::new(new_hook));
     }
     serve(listener, handler, shutdown_signal).await;
+    worker.stop().await;
     if register_panic_hook {
         let _ = std::panic::take_hook();
     }
