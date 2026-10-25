@@ -473,6 +473,62 @@ impl MigrationEngine {
             .collect())
     }
 
+    /// Returns the migrations that haven't been applied to the database yet,
+    /// in the order [`run`](Self::run) would apply them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the list of applied migrations can't be read from
+    /// the database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::db::migrations::{Field, Migration, MigrationDependency, MigrationEngine, Operation};
+    /// use cot::db::{Database, DatabaseField, Identifier};
+    ///
+    /// struct MyMigration;
+    ///
+    /// impl Migration for MyMigration {
+    ///     const APP_NAME: &'static str = "todoapp";
+    ///     const MIGRATION_NAME: &'static str = "m_0001_initial";
+    ///     const DEPENDENCIES: &'static [MigrationDependency] = &[];
+    ///     const OPERATIONS: &'static [Operation] = &[Operation::create_model()
+    ///         .table_name(Identifier::new("todoapp__my_model"))
+    ///         .fields(&[
+    ///             Field::new(Identifier::new("id"), <i32 as DatabaseField>::TYPE)
+    ///                 .primary_key()
+    ///                 .auto(),
+    ///         ])
+    ///         .build()];
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> cot::Result<()> {
+    /// let engine = MigrationEngine::new([MyMigration])?;
+    /// let database = Database::new("sqlite::memory:").await?;
+    /// assert_eq!(engine.pending(&database).await?.len(), 1);
+    ///
+    /// engine.run(&database).await?;
+    /// assert!(engine.pending(&database).await?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn pending(&self, database: &Database) -> Result<Vec<&SyncDynMigration>> {
+        CREATE_APPLIED_MIGRATIONS_MIGRATION
+            .forwards(database)
+            .await?;
+
+        let mut pending = Vec::new();
+        for migration in &self.migrations {
+            if !Self::is_migration_applied(database, migration).await? {
+                pending.push(&*migration.0);
+            }
+        }
+
+        Ok(pending)
+    }
+
     async fn is_migration_applied(
         database: &Database,
         migration: &MigrationWrapper,
