@@ -122,6 +122,56 @@ pub trait App: Send + Sync {
         Ok(())
     }
 
+    /// Runs before pending migrations are applied to the project's database.
+    ///
+    /// When the project starts and some migrations of the registered apps
+    /// haven't been applied to its database yet, this method is called for
+    /// every app with the list of those migrations, in the order they will be
+    /// applied, before any of them is. It isn't called when there is nothing
+    /// to apply. It can be used, for instance, to back up the database before
+    /// its schema changes.
+    ///
+    /// # Errors
+    ///
+    /// Returning an error stops the project from starting, and no migrations
+    /// are applied.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::db::migrations::SyncDynMigration;
+    /// use cot::{App, ProjectContext};
+    ///
+    /// struct MyApp;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl App for MyApp {
+    ///     fn name(&self) -> &str {
+    ///         "my_app"
+    ///     }
+    ///
+    ///     async fn before_migrations(
+    ///         &self,
+    ///         context: &ProjectContext,
+    ///         pending: &[&SyncDynMigration],
+    ///     ) -> cot::Result<()> {
+    ///         for migration in pending {
+    ///             println!("Applying {}::{}", migration.app_name(), migration.name());
+    ///         }
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    #[cfg(feature = "db")]
+    #[expect(unused_variables)]
+    async fn before_migrations(
+        &self,
+        context: &ProjectContext,
+        pending: &[&SyncDynMigration],
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
     /// Returns the router for the app. By default, it returns an empty router.
     ///
     /// # Examples
@@ -2143,6 +2193,14 @@ pub async fn run_at_with_shutdown(
             migrations.extend(app.migrations());
         }
         let migration_engine = MigrationEngine::new(migrations)?;
+
+        let pending = migration_engine.pending(database).await?;
+        if !pending.is_empty() {
+            for app in &context.apps {
+                app.before_migrations(&context, &pending).await?;
+            }
+        }
+
         migration_engine.run(database).await?;
     }
 
