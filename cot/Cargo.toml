@@ -35,6 +35,7 @@ fake = { workspace = true, optional = true, features = ["derive", "chrono"] }
 form_urlencoded.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 hex.workspace = true
 http-body-util.workspace = true
 http.workspace = true

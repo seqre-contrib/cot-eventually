@@ -735,12 +735,100 @@ impl ToDbValue for Option<PasswordHash> {
 #[cfg(feature = "db")]
 impl TextField for PasswordHash {}
 
+/// A secret token that authenticates a user without a session.
+///
+/// Clients send it in the `Authorization` request header, as in
+/// `Authorization: Bearer <token>`. When a request carries one,
+/// [`Auth`] resolves the user through [`AuthBackend::get_by_token`] instead of
+/// the session.
+///
+/// The token is a secret, so its [`Debug`] output doesn't show it.
+///
+/// # Examples
+///
+/// ```
+/// use cot::auth::BearerToken;
+///
+/// let token = BearerToken::new("4e3d…");
+/// assert_eq!(token.as_str(), "4e3d…");
+/// assert_eq!(format!("{token:?}"), "BearerToken(\"**********\")");
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct BearerToken(String);
+
+impl BearerToken {
+    /// Creates a token from its string form.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::auth::BearerToken;
+    ///
+    /// let token = BearerToken::new("4e3d…");
+    /// ```
+    #[must_use]
+    pub fn new<T: Into<String>>(token: T) -> Self {
+        Self(token.into())
+    }
+
+    /// Returns the token as a string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::auth::BearerToken;
+    ///
+    /// let token = BearerToken::new("4e3d…");
+    /// assert_eq!(token.as_str(), "4e3d…");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the token as a string, consuming the object.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::auth::BearerToken;
+    ///
+    /// let token = BearerToken::new("4e3d…");
+    /// assert_eq!(token.into_string(), "4e3d…");
+    /// ```
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    /// Reads the token from an `Authorization: Bearer <token>` header.
+    ///
+    /// Returns [`None`] if there is no such header, or it uses a different
+    /// authentication scheme.
+    fn from_headers(headers: &http::HeaderMap) -> Option<Self> {
+        let value = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
+        let (scheme, token) = value.split_once(' ')?;
+        let token = token.trim();
+        (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then(|| Self::new(token))
+    }
+}
+
+impl Debug for BearerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BearerToken").field(&"**********").finish()
+    }
+}
+
 /// Authentication helper structure.
 ///
 /// This is an object that provides methods to sign users in and out, by using
 /// the authentication backend defined in the project configuration. It is
 /// constructed by [`AuthMiddleware`](crate::middleware::AuthMiddleware) and
 /// included in every [`Request`] object as long as the middleware is active.
+///
+/// The current user comes from the session, or, for a request with an
+/// `Authorization: Bearer <token>` header, from the [`BearerToken`] alone,
+/// through [`AuthBackend::get_by_token`].
 ///
 /// # Security
 ///
@@ -761,7 +849,8 @@ impl Auth {
         secret_key: SecretKey,
         fallback_secret_keys: &[SecretKey],
     ) -> cot::Result<Self> {
-        let inner = AuthInner::new(session, backend, secret_key, fallback_secret_keys).await?;
+        let inner =
+            AuthInner::new(session, backend, secret_key, fallback_secret_keys, None).await?;
         Ok(Self {
             inner: Arc::new(inner),
         })
@@ -856,14 +945,22 @@ impl AuthInner {
         backend: Arc<dyn AuthBackend>,
         secret_key: SecretKey,
         fallback_secret_keys: &[SecretKey],
+        token: Option<BearerToken>,
     ) -> cot::Result<Self> {
+        // A request with a token is authenticated by the token alone, even if
+        // it also has a session, so that an invalid token is never ignored.
+        let user = match token {
+            Some(token) => backend.get_by_token(&token).await?,
+            None => {
+                get_user_with_saved_id(&session, &*backend, &secret_key, fallback_secret_keys)
+                    .await?
+            }
+        };
         #[expect(trivial_casts)] // cast to Arc<dyn User + Send + Sync>
-        let user = get_user_with_saved_id(&session, &*backend, &secret_key, fallback_secret_keys)
-            .await?
-            .map_or_else(
-                || Arc::new(AnonymousUser) as Arc<dyn User + Send + Sync>,
-                Arc::from,
-            );
+        let user = user.map_or_else(
+            || Arc::new(AnonymousUser) as Arc<dyn User + Send + Sync>,
+            Arc::from,
+        );
 
         Ok(Self {
             session,
@@ -879,8 +976,16 @@ impl AuthInner {
         let session = Session::from_request(request).clone();
         let backend = request.context().auth_backend().clone();
         let secret_key = config.secret_key.clone();
+        let token = BearerToken::from_headers(request.headers());
 
-        Self::new(session, backend, secret_key, &config.fallback_secret_keys).await
+        Self::new(
+            session,
+            backend,
+            secret_key,
+            &config.fallback_secret_keys,
+            token,
+        )
+        .await
     }
 
     fn user(&self) -> Arc<dyn User + Send + Sync> {
@@ -1051,6 +1156,26 @@ pub trait AuthBackend: Send + Sync {
     /// }
     /// ```
     async fn get_by_id(&self, id: UserId) -> Result<Option<Box<dyn User + Send + Sync>>>;
+
+    /// Get a user by a [`BearerToken`] sent with a request.
+    ///
+    /// This method returns the user the token belongs to. If the token isn't
+    /// valid, it should return `None`. [`Auth`] calls it for requests with an
+    /// `Authorization: Bearer <token>` header.
+    ///
+    /// The default implementation doesn't accept any tokens and always
+    /// returns `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the user object cannot be fetched.
+    #[expect(unused_variables)]
+    async fn get_by_token(
+        &self,
+        token: &BearerToken,
+    ) -> Result<Option<Box<dyn User + Send + Sync>>> {
+        Ok(None)
+    }
 }
 
 /// A no-op authentication backend.
@@ -1134,6 +1259,128 @@ mod tests {
             .fallback_secret_keys(fallback_keys)
             .clone()
             .build()
+    }
+
+    /// A user that only has a name.
+    struct NamedUser(&'static str);
+
+    impl User for NamedUser {
+        fn id(&self) -> Option<UserId> {
+            Some(UserId::Int(1))
+        }
+
+        fn username(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::from(self.0))
+        }
+
+        fn is_authenticated(&self) -> bool {
+            true
+        }
+    }
+
+    /// Returns "session-user" by its ID and "token-user" for the token
+    /// "valid".
+    struct TokenAuthBackend;
+
+    #[async_trait]
+    impl AuthBackend for TokenAuthBackend {
+        async fn authenticate(
+            &self,
+            _credentials: &(dyn Any + Send + Sync),
+        ) -> Result<Option<Box<dyn User + Send + Sync>>> {
+            Ok(None)
+        }
+
+        async fn get_by_id(&self, _id: UserId) -> Result<Option<Box<dyn User + Send + Sync>>> {
+            Ok(Some(Box::new(NamedUser("session-user"))))
+        }
+
+        async fn get_by_token(
+            &self,
+            token: &BearerToken,
+        ) -> Result<Option<Box<dyn User + Send + Sync>>> {
+            if token.as_str() == "valid" {
+                Ok(Some(Box::new(NamedUser("token-user"))))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    async fn auth_with_session_user_and_header(authorization: Option<&str>) -> Auth {
+        let mut request = test_request_with_auth_backend(TokenAuthBackend);
+        Session::from_request(&request)
+            .insert(USER_ID_SESSION_KEY, UserId::Int(1))
+            .await
+            .unwrap();
+        if let Some(authorization) = authorization {
+            request.headers_mut().insert(
+                http::header::AUTHORIZATION,
+                http::HeaderValue::from_str(authorization).unwrap(),
+            );
+        }
+
+        Auth::from_request(&mut request).await.unwrap()
+    }
+
+    #[test]
+    fn bearer_token_from_headers() {
+        let token = |value: &str| {
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                http::header::AUTHORIZATION,
+                http::HeaderValue::from_str(value).unwrap(),
+            );
+            BearerToken::from_headers(&headers).map(BearerToken::into_string)
+        };
+
+        assert_eq!(token("Bearer abc123"), Some("abc123".to_owned()));
+        assert_eq!(token("bearer abc123"), Some("abc123".to_owned()));
+        assert_eq!(token("Bearer  abc123 "), Some("abc123".to_owned()));
+        assert_eq!(token("Bearer "), None);
+        assert_eq!(token("Bearer"), None);
+        assert_eq!(token("Basic dXNlcjpwYXNz"), None);
+        assert_eq!(BearerToken::from_headers(&http::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn bearer_token_debug() {
+        let token = BearerToken::new("secret");
+        assert!(!format!("{token:?}").contains("secret"));
+    }
+
+    #[cot::test]
+    async fn user_from_bearer_token() {
+        let auth = auth_with_session_user_and_header(Some("Bearer valid")).await;
+
+        assert_eq!(auth.user().username(), Some(Cow::from("token-user")));
+    }
+
+    #[cot::test]
+    async fn invalid_bearer_token_ignores_session() {
+        let auth = auth_with_session_user_and_header(Some("Bearer invalid")).await;
+
+        assert!(!auth.user().is_authenticated());
+    }
+
+    #[cot::test]
+    async fn other_authorization_scheme_uses_session() {
+        let auth = auth_with_session_user_and_header(Some("Basic dXNlcjpwYXNz")).await;
+
+        assert_eq!(auth.user().username(), Some(Cow::from("session-user")));
+    }
+
+    #[cot::test]
+    async fn bearer_token_not_accepted_by_default() {
+        let mut request = test_request(MockUser::new);
+        request.headers_mut().insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("Bearer valid"),
+        );
+
+        let auth = Auth::from_request(&mut request).await.unwrap();
+
+        assert!(!auth.user().is_authenticated());
     }
 
     #[test]

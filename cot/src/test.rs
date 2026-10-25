@@ -23,7 +23,7 @@ use tower_sessions::MemoryStore;
 
 #[cfg(feature = "db")]
 use crate::auth::db::DatabaseUserBackend;
-use crate::auth::{Auth, AuthBackend, NoAuthBackend, User, UserId};
+use crate::auth::{Auth, AuthBackend, BearerToken, NoAuthBackend, User, UserId};
 #[cfg(feature = "cache")]
 use crate::cache::Cache;
 #[cfg(feature = "cache")]
@@ -275,6 +275,13 @@ impl AuthBackend for AuthBackendWrapper {
         id: UserId,
     ) -> cot::auth::Result<Option<Box<dyn User + Send + Sync>>> {
         self.inner.get_by_id(id).await
+    }
+
+    async fn get_by_token(
+        &self,
+        token: &BearerToken,
+    ) -> cot::auth::Result<Option<Box<dyn User + Send + Sync>>> {
+        self.inner.get_by_token(token).await
     }
 }
 
