@@ -24,55 +24,6 @@ use crate::config::{StaticFilesConfig, StaticFilesPathRewriteMode};
 use crate::project::MiddlewareContext;
 use crate::response::{Response, ResponseExt};
 
-/// Macro to define static files by specifying paths.
-///
-/// The files are embedded at compile time using the `include_bytes!` macro.
-/// The paths are relative to the `static` directory of the project (under the
-/// project root, where the `Cargo.toml` file is).
-///
-/// This is mainly useful with the
-/// [`CotApp::static_files`](crate::App::static_files) trait method.
-///
-/// # Example
-///
-/// ```
-/// use bytes::Bytes;
-/// use cot::static_files::StaticFile;
-/// use cot::{App, static_files};
-///
-/// pub struct ExampleApp;
-///
-/// // Project structure:
-/// // .
-/// // ├── Cargo.toml
-/// // └── static
-/// //     └── test
-/// //         └── test.txt
-///
-/// impl App for ExampleApp {
-///     fn name(&self) -> &str {
-///         "test_app"
-///     }
-///
-///     fn static_files(&self) -> Vec<StaticFile> {
-///         static_files!("test/test.txt")
-///     }
-/// }
-/// ```
-#[macro_export]
-macro_rules! static_files {
-    ($($path:literal),* $(,)?) => {
-        ::std::vec![$(
-            $crate::static_files::StaticFile::new(
-                $path.to_string(),
-                $crate::__private::Bytes::from_static(
-                    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/static/", $path))
-                ),
-            )
-        ),*]
-    };
-}
-
 /// Struct representing a collection of static files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StaticFiles {
@@ -404,7 +355,7 @@ mod tests {
     use super::*;
     use crate::config::{ProjectConfig, StaticFilesConfig, StaticFilesPathRewriteMode};
     use crate::project::RegisterAppsContext;
-    use crate::{App, AppBuilder, Bootstrapper, Project};
+    use crate::{App, AppBuilder, Bootstrapper, Project, static_files};
 
     #[test]
     #[cfg_attr(
@@ -646,6 +597,34 @@ mod tests {
         let static_files = static_files!("test/test.txt",);
 
         assert_eq!(static_files.len(), 1);
+    }
+
+    #[test]
+    fn static_files_macro_directory() {
+        let static_files = static_files!("test/dir");
+
+        let paths: Vec<_> = static_files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["test/dir/a.txt", "test/dir/nested/b.css"]);
+        assert_eq!(
+            static_files[0].content,
+            Bytes::from_static(include_bytes!("../static/test/dir/a.txt"))
+        );
+        assert_eq!(
+            static_files[1].content,
+            Bytes::from_static(include_bytes!("../static/test/dir/nested/b.css"))
+        );
+        assert_eq!(static_files[1].mime_type, mime::TEXT_CSS);
+    }
+
+    #[test]
+    fn static_files_macro_file_and_directory() {
+        let static_files = static_files!("test/test.txt", "test/dir/");
+
+        let paths: Vec<_> = static_files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["test/test.txt", "test/dir/a.txt", "test/dir/nested/b.css"]
+        );
     }
 
     #[test]
