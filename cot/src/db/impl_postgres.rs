@@ -92,7 +92,10 @@ mod tests {
         let db_connection = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy(&format!("{db_url}/postgres"))
             .expect("lazy pool creation should not fail");
-        DatabasePostgres { db_connection }
+        DatabasePostgres {
+            db_connection,
+            begin_statement: None,
+        }
     }
 
     fn col_expr() -> SimpleExpr {

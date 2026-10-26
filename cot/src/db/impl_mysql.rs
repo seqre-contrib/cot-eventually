@@ -95,7 +95,10 @@ mod tests {
         let db_connection = sqlx::mysql::MySqlPoolOptions::new()
             .connect_lazy(&format!("{db_url}/mysql"))
             .expect("lazy pool creation should not fail");
-        DatabaseMySql { db_connection }
+        DatabaseMySql {
+            db_connection,
+            begin_statement: None,
+        }
     }
 
     fn col_expr() -> SimpleExpr {
