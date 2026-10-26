@@ -56,6 +56,7 @@ Database authentication backend. This enables [`DatabaseUserBackend`](struct@cot
 | `journal_mode` | `"delete"`, `"truncate"`, `"persist"`, `"memory"`, `"wal"`, `"off"` | *(unset)* | The [journal mode](https://www.sqlite.org/pragma.html#pragma_journal_mode) of the database. The journal mode is stored in the database file once it's set to `wal`, so it applies to every later connection, too. |
 | `synchronous` | `"off"`, `"normal"`, `"full"`, `"extra"` | *(unset)* | The [synchronous](https://www.sqlite.org/pragma.html#pragma_synchronous) setting of each connection. `normal` is a common choice together with the `wal` journal mode: it is faster than SQLite's default, `full`, and still keeps the database consistent after a power loss. |
 | `busy_timeout` | string | *(unset)* | How long a connection waits for a lock on the database before it gives up with a "database is locked" error. When not set, it is 5 seconds. |
+| `transaction_behavior` | `"deferred"`, `"immediate"`, `"exclusive"` | *(unset)* | How the transactions started with `Database::begin` take their locks. By default, SQLite starts a transaction without a lock and takes the write lock at the first write. A transaction that reads and then writes can then fail at once with "database is locked" when another connection wrote in between, without waiting for `busy_timeout`. With `SqliteTransactionBehavior::Immediate`, the write lock is taken when the transaction starts, so concurrent transactions wait for each other instead. |
 
 ## `[cache]`
 
@@ -197,6 +198,7 @@ type = "none"
 # journal_mode = ...
 # synchronous = ...
 # busy_timeout = ...
+# transaction_behavior = ...
 
 [cache]
 max_retries = 3

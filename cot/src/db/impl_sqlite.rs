@@ -18,9 +18,17 @@ impl DatabaseSqlite {
         url: &str,
         config: &crate::config::SqliteConfig,
     ) -> crate::db::Result<Self> {
+        use crate::config::SqliteTransactionBehavior;
+
         let options = connect_options(url, config)?;
         let db_connection = sqlx::sqlite::SqlitePool::connect_with(options).await?;
-        Self::from_pool(db_connection).await
+        let mut db = Self::from_pool(db_connection).await?;
+        db.begin_statement = config.transaction_behavior.map(|behavior| match behavior {
+            SqliteTransactionBehavior::Deferred => "BEGIN DEFERRED",
+            SqliteTransactionBehavior::Immediate => "BEGIN IMMEDIATE",
+            SqliteTransactionBehavior::Exclusive => "BEGIN EXCLUSIVE",
+        });
+        Ok(db)
     }
 
     async fn init(&self) -> crate::db::Result<()> {
@@ -200,6 +208,64 @@ mod tests {
             assert_eq!(synchronous, 1); // NORMAL
             assert_eq!(busy_timeout, 10_000);
         }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        miri,
+        ignore = "unsupported operation: can't call foreign function `sqlite3_open_v2`"
+    )]
+    async fn immediate_transactions_wait_for_each_other() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::config::{SqliteConfig, SqliteJournalMode, SqliteTransactionBehavior};
+
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("db.sqlite3").display()
+        );
+        let config = SqliteConfig::builder()
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5))
+            .transaction_behavior(SqliteTransactionBehavior::Immediate)
+            .build();
+        let db = Arc::new(DatabaseSqlite::with_config(&url, &config).await.unwrap());
+        sqlx::query("CREATE TABLE counts (n INTEGER)")
+            .execute(&db.db_connection)
+            .await
+            .unwrap();
+
+        // Each transaction reads and then writes. When transactions are
+        // deferred, the second one to write fails with "database is locked"
+        // if the other one committed after it read.
+        let read_then_write = |db: Arc<DatabaseSqlite>| async move {
+            let mut transaction = db.begin().await?;
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM counts")
+                .fetch_one(&mut *transaction)
+                .await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            sqlx::query("INSERT INTO counts (n) VALUES (?)")
+                .bind(count)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            Ok::<_, crate::db::DatabaseError>(())
+        };
+        let (first, second) = tokio::join!(
+            read_then_write(Arc::clone(&db)),
+            read_then_write(Arc::clone(&db))
+        );
+        first.unwrap();
+        second.unwrap();
+
+        // one after the other: the second saw the first one's row
+        let counts: Vec<i64> = sqlx::query_scalar("SELECT n FROM counts ORDER BY n")
+            .fetch_all(&db.db_connection)
+            .await
+            .unwrap();
+        assert_eq!(counts, [0, 1]);
     }
 
     #[test]

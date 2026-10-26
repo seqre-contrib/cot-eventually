@@ -669,6 +669,41 @@ pub struct SqliteConfig {
     #[cfg_attr(feature = "_internal_config-docs", schemars(with = "Option<String>"))]
     #[builder(setter(strip_option), default)]
     pub busy_timeout: Option<Duration>,
+
+    /// How the transactions started with [`Database::begin`] take their locks.
+    ///
+    /// By default, SQLite starts a transaction without a lock and takes the
+    /// write lock at the first write. A transaction that reads and then writes
+    /// can then fail at once with "database is locked" when another connection
+    /// wrote in between, without waiting for
+    /// [`busy_timeout`](Self::busy_timeout).
+    /// With [`SqliteTransactionBehavior::Immediate`], the write lock is taken
+    /// when the transaction starts, so concurrent transactions wait for each
+    /// other instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::config::{ProjectConfig, SqliteTransactionBehavior};
+    ///
+    /// let config = ProjectConfig::from_toml(
+    ///     r#"
+    /// [database]
+    /// url = "sqlite://db.sqlite3?mode=rwc"
+    /// sqlite.transaction_behavior = "immediate"
+    /// "#,
+    /// )?;
+    ///
+    /// assert_eq!(
+    ///     config.database.sqlite.transaction_behavior,
+    ///     Some(SqliteTransactionBehavior::Immediate)
+    /// );
+    /// # Ok::<(), cot::Error>(())
+    /// ```
+    ///
+    /// [`Database::begin`]: crate::db::Database::begin
+    #[builder(setter(strip_option), default)]
+    pub transaction_behavior: Option<SqliteTransactionBehavior>,
 }
 
 #[cfg(feature = "db")]
@@ -689,6 +724,7 @@ impl SqliteConfigBuilder {
             journal_mode: self.journal_mode.unwrap_or_default(),
             synchronous: self.synchronous.unwrap_or_default(),
             busy_timeout: self.busy_timeout.unwrap_or_default(),
+            transaction_behavior: self.transaction_behavior.unwrap_or_default(),
         }
     }
 }
@@ -758,6 +794,27 @@ pub enum SqliteSynchronous {
     /// Like `full`, and the directory is synced after a rollback journal is
     /// deleted, too.
     Extra,
+}
+
+/// How an SQLite [transaction](https://www.sqlite.org/lang_transaction.html)
+/// takes its locks.
+///
+/// It is used as part of the [`SqliteConfig`] struct.
+#[cfg(feature = "db")]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "_internal_config-docs", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SqliteTransactionBehavior {
+    /// Locks are taken when the transaction first reads or writes. This is
+    /// SQLite's default.
+    Deferred,
+    /// The write lock is taken when the transaction starts; other connections
+    /// can still read.
+    Immediate,
+    /// Like `immediate`; in WAL mode the two are the same, and otherwise other
+    /// connections can't read either.
+    Exclusive,
 }
 
 /// Expiration policy for cached values.
