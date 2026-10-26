@@ -11,6 +11,8 @@ macro_rules! impl_sea_query_db_backend {
         #[derive(Debug)]
         pub(super) struct $db_name {
             db_connection: $pool_ty,
+            /// The statement that starts a transaction, if not the driver's default.
+            begin_statement: Option<&'static str>,
         }
 
         impl $db_name {
@@ -20,7 +22,10 @@ macro_rules! impl_sea_query_db_backend {
             }
 
             async fn from_pool(db_connection: $pool_ty) -> crate::db::Result<Self> {
-                let db = Self { db_connection };
+                let db = Self {
+                    db_connection,
+                    begin_statement: None,
+                };
                 db.init().await?;
                 Ok(db)
             }
@@ -33,10 +38,11 @@ macro_rules! impl_sea_query_db_backend {
             pub(super) async fn begin(
                 &self,
             ) -> crate::db::Result<sqlx::Transaction<'static, $sqlx_db_ty>> {
-                self.db_connection
-                    .begin()
-                    .await
-                    .map_err(crate::db::sea_query_db::map_sqlx_error)
+                match self.begin_statement {
+                    Some(statement) => self.db_connection.begin_with(statement).await,
+                    None => self.db_connection.begin().await,
+                }
+                .map_err(crate::db::sea_query_db::map_sqlx_error)
             }
 
             pub(super) async fn fetch_option<T: sea_query_sqlx::SqlxBinder + Send + Sync>(
