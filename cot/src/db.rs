@@ -151,6 +151,27 @@ use cot_core::error::impl_into_cot_error;
 /// }
 /// ```
 ///
+/// ## `default`
+/// The `default` attribute sets the value the database stores in the column
+/// when a row doesn't give one. It must be a boolean, number or string literal
+/// that the field's type can hold. Rows inserted through the model always give
+/// every value, so it matters mostly for migrations: when the field is added
+/// to a table that already has rows, they get this value, which lets a
+/// non-nullable field be added to it.
+///
+/// ```
+/// use cot::db::{Auto, model};
+///
+/// #[model]
+/// struct User {
+///     #[model(primary_key)]
+///     id: Auto<i32>,
+///     username: String,
+///     #[model(default = true)]
+///     is_active: bool,
+/// }
+/// ```
+///
 /// ## `field_name`
 /// The `field_name` attribute is used to provide a specific name for the field
 /// in the created database table to which the Rust field is mapped to. This
