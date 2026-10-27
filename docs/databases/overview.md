@@ -65,6 +65,20 @@ pub struct User {
 }
 ```
 
+### `default`
+This is used to set the value the database stores in the column when a row doesn't give one. When you add a non-nullable field to a model whose table already has rows, the migration needs a default for those rows. For more information see the [model field reference](attr@cot::db::model).
+
+```rust
+#[model]
+pub struct User {
+    #[model(primary_key)]
+    id: Auto<i64>,
+    username: String,
+    #[model(default = true)]
+    is_active: bool,
+}
+```
+
 ### `field_name`
 This is used to specify a custom column name for a field in the database table.
 
