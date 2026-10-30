@@ -796,22 +796,27 @@ pub struct TaskRunner {
     backend: Arc<dyn TaskBackend>,
     scheduled: HashMap<String, ScheduledTask>,
     queued: HashMap<String, QueuedTask>,
+    /// When the project started, until the first runs of the scheduled tasks
+    /// are added. They are added when runs are first looked for, as the
+    /// backend's storage may not be ready before then, such as a database
+    /// table that a migration creates.
+    #[debug("..")]
+    started: Mutex<Option<Timestamp>>,
 }
 
 impl TaskRunner {
-    /// Creates a runner for the given tasks and adds the first run of each
-    /// scheduled one, at its first scheduled time after the clock's current
-    /// time.
+    /// Creates a runner for the given tasks. The first run of each scheduled
+    /// one is at its first scheduled time after the clock's current time.
     ///
     /// # Panics
     ///
     /// Panics if two tasks have the same name.
-    pub(crate) async fn new(
+    pub(crate) fn new(
         clock: Arc<dyn Clock>,
         backend: Arc<dyn TaskBackend>,
         scheduled_tasks: Vec<ScheduledTask>,
         queued_tasks: Vec<QueuedTask>,
-    ) -> crate::Result<Self> {
+    ) -> Self {
         let now = clock.now();
         let mut names = HashSet::new();
         let mut register = |name: &str| {
@@ -824,7 +829,6 @@ impl TaskRunner {
         for scheduled_task in scheduled_tasks {
             let name = scheduled_task.task.name().to_owned();
             register(&name);
-            backend.enqueue(scheduled_task.run_after(now)).await?;
             scheduled.insert(name, scheduled_task);
         }
         let mut queued = HashMap::new();
@@ -834,12 +838,13 @@ impl TaskRunner {
             queued.insert(name, queued_task);
         }
 
-        Ok(Self {
+        Self {
             clock,
             backend,
             scheduled,
             queued,
-        })
+            started: Mutex::new(Some(now)),
+        }
     }
 
     /// Creates a runner without any tasks.
@@ -850,6 +855,7 @@ impl TaskRunner {
             backend: Arc::new(MemoryTaskBackend::new()),
             scheduled: HashMap::new(),
             queued: HashMap::new(),
+            started: Mutex::new(None),
         }
     }
 
@@ -906,6 +912,22 @@ impl TaskRunner {
     /// Returns an error if the runs could not be retrieved from or added to
     /// the task backend.
     pub async fn run_due(&self, context: &ProjectContext) -> crate::Result<usize> {
+        let started = *self
+            .started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(started) = started {
+            for scheduled_task in self.scheduled.values() {
+                self.backend
+                    .enqueue(scheduled_task.run_after(started))
+                    .await?;
+            }
+            *self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+
         let now = self.clock.now();
         let due = self.backend.take_due(now).await?;
 

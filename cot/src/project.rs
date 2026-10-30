@@ -1490,6 +1490,11 @@ impl Bootstrapper<WithCache> {
     /// # Ok(())
     /// # }
     /// ```
+    #[expect(
+        clippy::unused_async,
+        reason = "for consistency with other Bootstrapper::boot methods"
+    )]
+    #[expect(clippy::unused_async_trait_impl)]
     pub async fn boot(self) -> cot::Result<Bootstrapper<Initialized>> {
         let router_service = RouterService::new(Arc::clone(&self.context.router));
         let handler_builder = RootHandlerBuilder {
@@ -1516,8 +1521,7 @@ impl Bootstrapper<WithCache> {
             self.project.task_backend(&self.context),
             scheduled_tasks,
             queued_tasks,
-        )
-        .await?;
+        );
         let context = self.context.with_auth(auth_backend, tasks);
 
         Ok(Bootstrapper {
