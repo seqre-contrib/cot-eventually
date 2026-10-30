@@ -1,10 +1,17 @@
 //! Background tasks.
 //!
 //! Background tasks are work that a project does outside of handling
-//! requests. Currently, these are scheduled tasks: tasks that run at given
-//! times, such as a cleanup every night or a check every few minutes. Apps
-//! declare them in [`App::scheduled_tasks`](crate::App::scheduled_tasks), and a
-//! running project runs each one when it is due.
+//! requests. There are two kinds:
+//!
+//! - **Scheduled tasks** run at given times, such as a cleanup every night or a
+//!   check every few minutes. Apps declare them in
+//!   [`App::scheduled_tasks`](crate::App::scheduled_tasks), and a running
+//!   project runs each one when it is due.
+//! - **Queued tasks** run once each time they are queued, with the data they
+//!   are queued with, such as sending an email after a sign-up. Apps declare
+//!   them in [`App::queued_tasks`](crate::App::queued_tasks) and queue runs
+//!   with [`TaskRunner::queue`]. A run that fails is tried again later, a few
+//!   times.
 //!
 //! Whether a task is due is checked against the project's [`Clock`], which
 //! the project can replace through [`Project::clock`](crate::Project::clock).
@@ -15,7 +22,9 @@
 //! The runs that are waiting to happen are kept by a [`TaskBackend`]. The
 //! default one, [`MemoryTaskBackend`], keeps them in memory, so after a
 //! restart, each scheduled task next runs at its first scheduled time after
-//! the start.
+//! the start, and queued runs that were waiting are lost. The database
+//! backend in [`db`] keeps them in the project's database instead, and can
+//! queue a run in the same transaction as the change that causes it.
 //!
 //! # Examples
 //!
@@ -54,8 +63,58 @@
 //!     }
 //! }
 //! ```
+//!
+//! A queued task reads the data it was queued with from its context:
+//!
+//! ```
+//! use cot::App;
+//! use cot::tasks::{QueuedTask, Task, TaskContext, TaskRun};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Serialize, Deserialize)]
+//! struct Welcome {
+//!     email: String,
+//! }
+//!
+//! struct SendWelcome;
+//!
+//! #[async_trait::async_trait]
+//! impl Task for SendWelcome {
+//!     fn name(&self) -> &str {
+//!         "my_app::send_welcome"
+//!     }
+//!
+//!     async fn run(&self, context: &TaskContext<'_>) -> cot::Result<()> {
+//!         let welcome: Welcome = context.payload()?;
+//!         println!("welcoming {}", welcome.email);
+//!         Ok(())
+//!     }
+//! }
+//!
+//! struct MyApp;
+//!
+//! impl App for MyApp {
+//!     fn name(&self) -> &str {
+//!         "my_app"
+//!     }
+//!
+//!     fn queued_tasks(&self) -> Vec<QueuedTask> {
+//!         vec![QueuedTask::new(SendWelcome)]
+//!     }
+//! }
+//!
+//! // in a request handler, after a sign-up:
+//! # async fn sign_up(context: &cot::ProjectContext) -> cot::Result<()> {
+//! let now = context.tasks().clock().now();
+//! let run = TaskRun::new("my_app::send_welcome", now).with_payload(&Welcome {
+//!     email: "ann@example.com".to_owned(),
+//! })?;
+//! context.tasks().queue(run).await?;
+//! # Ok(())
+//! # }
+//! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -64,12 +123,24 @@ use derive_more::with_trait::Debug;
 use jiff::Timestamp;
 use jiff::civil::Time;
 use jiff::tz::TimeZone;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tracing::{error, warn};
 
-use crate::ProjectContext;
+use crate::{Error, ProjectContext};
+
+#[cfg(feature = "db")]
+pub mod db;
 
 /// How often a running project checks for tasks that are due.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How many times a queued run is tried, unless its task says otherwise.
+const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+
+/// How long a queued run that failed waits before its first retry. Each
+/// retry after that waits four times as long as the one before.
+const FIRST_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// A source of the current time.
 ///
@@ -122,7 +193,9 @@ impl Clock for SystemClock {
 ///
 /// To run a task at given times, return it from
 /// [`App::scheduled_tasks`](crate::App::scheduled_tasks) together with a
-/// [`Schedule`]. See the [module documentation](self) for an example.
+/// [`Schedule`]. To run it each time it is queued, return it from
+/// [`App::queued_tasks`](crate::App::queued_tasks). See the [module
+/// documentation](self) for examples.
 #[async_trait]
 pub trait Task: Send + Sync {
     /// Returns the name of the task.
@@ -135,8 +208,10 @@ pub trait Task: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returning an error marks this run as failed. The error is logged, and
-    /// a scheduled task still runs again at its next scheduled time.
+    /// Returning an error marks this run as failed. The error is logged. A
+    /// scheduled task still runs again at its next scheduled time, and a
+    /// queued run is tried again later until it has been tried as many times
+    /// as its [`QueuedTask`] allows.
     async fn run(&self, context: &TaskContext<'_>) -> crate::Result<()>;
 }
 
@@ -144,7 +219,7 @@ pub trait Task: Send + Sync {
 #[derive(Debug)]
 pub struct TaskContext<'a> {
     project: &'a ProjectContext,
-    due: Timestamp,
+    run: &'a TaskRun,
 }
 
 impl<'a> TaskContext<'a> {
@@ -199,9 +274,80 @@ impl<'a> TaskContext<'a> {
     /// ```
     #[must_use]
     pub fn due(&self) -> Timestamp {
-        self.due
+        self.run.due
+    }
+
+    /// Returns the data the run was queued with, set with
+    /// [`TaskRun::with_payload`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the run has no data, as a scheduled run doesn't,
+    /// or if the data can't be read as a `T`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::tasks::{Task, TaskContext};
+    ///
+    /// struct Greet;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Task for Greet {
+    ///     fn name(&self) -> &str {
+    ///         "greet"
+    ///     }
+    ///
+    ///     async fn run(&self, context: &TaskContext<'_>) -> cot::Result<()> {
+    ///         let name: String = context.payload()?;
+    ///         println!("hello, {name}");
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    pub fn payload<T: DeserializeOwned>(&self) -> crate::Result<T> {
+        let payload = self
+            .run
+            .payload
+            .as_deref()
+            .ok_or_else(|| Error::internal(NoPayload(self.run.task.clone())))?;
+        serde_json::from_str(payload).map_err(Error::internal)
+    }
+
+    /// Returns how many times the run was tried before this time: 0 the
+    /// first time.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::tasks::{Task, TaskContext};
+    ///
+    /// struct Flaky;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Task for Flaky {
+    ///     fn name(&self) -> &str {
+    ///         "flaky"
+    ///     }
+    ///
+    ///     async fn run(&self, context: &TaskContext<'_>) -> cot::Result<()> {
+    ///         if context.attempt() > 0 {
+    ///             println!("trying again");
+    ///         }
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    #[must_use]
+    pub fn attempt(&self) -> u32 {
+        self.run.attempt
     }
 }
+
+/// The error of [`TaskContext::payload`] for a run without data.
+#[derive(Debug, thiserror::Error)]
+#[error("the run of task `{0}` has no payload")]
+struct NoPayload(String);
 
 /// When a scheduled task runs.
 ///
@@ -349,6 +495,12 @@ pub struct ScheduledTask {
 }
 
 impl ScheduledTask {
+    /// The next run of the task, at its first scheduled time after `now`.
+    fn run_after(&self, now: Timestamp) -> TaskRun {
+        let name = self.task.name();
+        TaskRun::new(name, self.schedule.next_after(now)).with_key(name)
+    }
+
     /// Creates a task that runs on the given schedule.
     ///
     /// See the [module documentation](self) for an example.
@@ -373,6 +525,85 @@ impl ScheduledTask {
     }
 }
 
+/// A [`Task`] that runs each time it is queued, with how many times a run is
+/// tried.
+///
+/// A run that fails is tried again after a while: 30 seconds after the first
+/// try, then each time four times longer than before. See the [module
+/// documentation](self) for an example.
+#[derive(Debug, Clone)]
+pub struct QueuedTask {
+    #[debug("{}", task.name())]
+    task: Arc<dyn Task>,
+    max_attempts: u32,
+}
+
+impl QueuedTask {
+    /// Creates a queued task whose runs are tried up to 5 times.
+    ///
+    /// See the [module documentation](self) for an example.
+    #[must_use]
+    pub fn new<T: Task + 'static>(task: T) -> Self {
+        Self {
+            task: Arc::new(task),
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+        }
+    }
+
+    /// Sets how many times a run is tried before giving up on it; 1 for no
+    /// retries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_attempts` is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::tasks::{QueuedTask, Task, TaskContext};
+    ///
+    /// struct Notify;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Task for Notify {
+    ///     fn name(&self) -> &str {
+    ///         "notify"
+    ///     }
+    ///
+    ///     async fn run(&self, _context: &TaskContext<'_>) -> cot::Result<()> {
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// let task = QueuedTask::new(Notify).max_attempts(10);
+    /// assert_eq!(task.attempts(), 10);
+    /// ```
+    #[must_use]
+    pub fn max_attempts(mut self, max_attempts: u32) -> Self {
+        assert!(max_attempts > 0, "a run should be tried at least once");
+        self.max_attempts = max_attempts;
+        self
+    }
+
+    /// Returns how many times a run is tried before giving up on it.
+    #[must_use]
+    pub fn attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    /// Returns the task.
+    #[must_use]
+    pub fn task(&self) -> &Arc<dyn Task> {
+        &self.task
+    }
+}
+
+/// How long a queued run waits after it failed for the `attempt`-th time,
+/// counting from 1.
+fn retry_delay(attempt: u32) -> Duration {
+    FIRST_RETRY_DELAY.saturating_mul(4_u32.saturating_pow(attempt.saturating_sub(1)))
+}
+
 /// A run of a task that is waiting to happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -381,6 +612,14 @@ pub struct TaskRun {
     pub task: String,
     /// When the run is due.
     pub due: Timestamp,
+    /// The data the run is for, as JSON; `None` for a scheduled run.
+    pub payload: Option<String>,
+    /// Identifies the run among those that are waiting: queuing a run with
+    /// the key of one that is waiting replaces it. Scheduled runs have their
+    /// task's name as their key, so each scheduled task waits only once.
+    pub key: Option<String>,
+    /// How many times the run was tried before: 0 until it first fails.
+    pub attempt: u32,
 }
 
 impl TaskRun {
@@ -400,7 +639,52 @@ impl TaskRun {
         Self {
             task: task.into(),
             due,
+            payload: None,
+            key: None,
+            attempt: 0,
         }
+    }
+
+    /// Sets the data the run is for, which the task reads with
+    /// [`TaskContext::payload`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `payload` can't be written as JSON.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::tasks::TaskRun;
+    /// use jiff::Timestamp;
+    ///
+    /// let run = TaskRun::new("greet", Timestamp::UNIX_EPOCH).with_payload("Ann")?;
+    /// assert_eq!(run.payload.as_deref(), Some(r#""Ann""#));
+    /// # Ok::<(), cot::Error>(())
+    /// ```
+    pub fn with_payload<T: Serialize + ?Sized>(mut self, payload: &T) -> crate::Result<Self> {
+        self.payload = Some(serde_json::to_string(payload).map_err(Error::internal)?);
+        Ok(self)
+    }
+
+    /// Sets the key of the run: queuing it replaces a waiting run with the
+    /// same key. Starting the key with the task's name keeps it apart from
+    /// the keys of other tasks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::tasks::TaskRun;
+    /// use jiff::Timestamp;
+    ///
+    /// // a reminder for user 5 that replaces any earlier one still waiting
+    /// let run = TaskRun::new("remind", Timestamp::UNIX_EPOCH).with_key("remind/5");
+    /// assert_eq!(run.key.as_deref(), Some("remind/5"));
+    /// ```
+    #[must_use]
+    pub fn with_key<T: Into<String>>(mut self, key: T) -> Self {
+        self.key = Some(key.into());
+        self
     }
 }
 
@@ -411,7 +695,8 @@ impl TaskRun {
 /// [`MemoryTaskBackend`].
 #[async_trait]
 pub trait TaskBackend: Send + Sync {
-    /// Adds a run that should happen once it's due.
+    /// Adds a run that should happen once it's due. If a run with the same
+    /// [key](TaskRun::key) is waiting, the new run replaces it.
     ///
     /// # Errors
     ///
@@ -482,7 +767,11 @@ impl MemoryTaskBackend {
 #[async_trait]
 impl TaskBackend for MemoryTaskBackend {
     async fn enqueue(&self, run: TaskRun) -> crate::Result<()> {
-        self.runs().push(run);
+        let mut runs = self.runs();
+        if run.key.is_some() {
+            runs.retain(|waiting| waiting.key != run.key);
+        }
+        runs.push(run);
         Ok(())
     }
 
@@ -506,44 +795,50 @@ pub struct TaskRunner {
     #[debug("..")]
     backend: Arc<dyn TaskBackend>,
     scheduled: HashMap<String, ScheduledTask>,
+    queued: HashMap<String, QueuedTask>,
 }
 
 impl TaskRunner {
-    /// Creates a runner for the given scheduled tasks and adds the first run
-    /// of each one, at its first scheduled time after the clock's current
+    /// Creates a runner for the given tasks and adds the first run of each
+    /// scheduled one, at its first scheduled time after the clock's current
     /// time.
     ///
     /// # Panics
     ///
-    /// Panics if two scheduled tasks have the same name.
+    /// Panics if two tasks have the same name.
     pub(crate) async fn new(
         clock: Arc<dyn Clock>,
         backend: Arc<dyn TaskBackend>,
         scheduled_tasks: Vec<ScheduledTask>,
+        queued_tasks: Vec<QueuedTask>,
     ) -> crate::Result<Self> {
         let now = clock.now();
+        let mut names = HashSet::new();
+        let mut register = |name: &str| {
+            assert!(
+                names.insert(name.to_owned()),
+                "task `{name}` is registered more than once"
+            );
+        };
         let mut scheduled = HashMap::new();
         for scheduled_task in scheduled_tasks {
             let name = scheduled_task.task.name().to_owned();
-            backend
-                .enqueue(TaskRun::new(
-                    name.clone(),
-                    scheduled_task.schedule.next_after(now),
-                ))
-                .await?;
-            let previous = scheduled.insert(name, scheduled_task);
-            if let Some(previous) = previous {
-                panic!(
-                    "scheduled task `{}` is registered more than once",
-                    previous.task.name()
-                );
-            }
+            register(&name);
+            backend.enqueue(scheduled_task.run_after(now)).await?;
+            scheduled.insert(name, scheduled_task);
+        }
+        let mut queued = HashMap::new();
+        for queued_task in queued_tasks {
+            let name = queued_task.task.name().to_owned();
+            register(&name);
+            queued.insert(name, queued_task);
         }
 
         Ok(Self {
             clock,
             backend,
             scheduled,
+            queued,
         })
     }
 
@@ -554,6 +849,7 @@ impl TaskRunner {
             clock: Arc::new(SystemClock),
             backend: Arc::new(MemoryTaskBackend::new()),
             scheduled: HashMap::new(),
+            queued: HashMap::new(),
         }
     }
 
@@ -563,13 +859,47 @@ impl TaskRunner {
         &self.clock
     }
 
+    /// Queues a run of a queued task, which happens once it's due. If a run
+    /// with the same [key](TaskRun::key) is waiting, the new run replaces it.
+    ///
+    /// To queue a run in the same database transaction as the change that
+    /// causes it, use [`db::queue`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task isn't one of the project's queued tasks,
+    /// or the run could not be added to the task backend.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::tasks::TaskRun;
+    ///
+    /// # async fn sign_up(context: &cot::ProjectContext) -> cot::Result<()> {
+    /// let now = context.tasks().clock().now();
+    /// context
+    ///     .tasks()
+    ///     .queue(TaskRun::new("my_app::send_welcome", now))
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn queue(&self, run: TaskRun) -> crate::Result<()> {
+        if !self.queued.contains_key(&run.task) {
+            return Err(Error::internal(UnknownTask(run.task)));
+        }
+        self.backend.enqueue(run).await
+    }
+
     /// Runs the tasks that are due at the clock's current time, one after
     /// another, and returns how many runs there were.
     ///
     /// After running a scheduled task, its next run is added at its next
     /// scheduled time after the current time, so runs that were missed while
     /// the project wasn't running, or while the clock jumped ahead, happen
-    /// only once. A task that fails is logged and doesn't stop the others.
+    /// only once. A queued run that fails is added again to be tried later,
+    /// until it has been tried as many times as its task allows. A task that
+    /// fails is logged and doesn't stop the others.
     ///
     /// # Errors
     ///
@@ -580,30 +910,45 @@ impl TaskRunner {
         let due = self.backend.take_due(now).await?;
 
         for run in &due {
-            let Some(scheduled_task) = self.scheduled.get(&run.task) else {
-                warn!(task = run.task, "skipping a run of an unknown task");
-                continue;
-            };
-
             let task_context = TaskContext {
                 project: context,
-                due: run.due,
+                run,
             };
-            if let Err(error) = scheduled_task.task.run(&task_context).await {
-                error!(task = run.task, %error, "task failed");
+            if let Some(scheduled_task) = self.scheduled.get(&run.task) {
+                if let Err(error) = scheduled_task.task.run(&task_context).await {
+                    error!(task = run.task, %error, "task failed");
+                }
+                self.backend.enqueue(scheduled_task.run_after(now)).await?;
+            } else if let Some(queued_task) = self.queued.get(&run.task) {
+                let Err(error) = queued_task.task.run(&task_context).await else {
+                    continue;
+                };
+                let attempt = run.attempt + 1;
+                if attempt >= queued_task.max_attempts {
+                    error!(task = run.task, attempts = attempt, %error, "task failed, giving up");
+                    continue;
+                }
+                let delay = retry_delay(attempt);
+                warn!(task = run.task, attempt, %error, retry_in = ?delay, "task failed, will retry");
+                let retry = TaskRun {
+                    due: now.checked_add(delay).unwrap_or(Timestamp::MAX),
+                    attempt,
+                    ..run.clone()
+                };
+                self.backend.enqueue(retry).await?;
+            } else {
+                warn!(task = run.task, "skipping a run of an unknown task");
             }
-
-            self.backend
-                .enqueue(TaskRun::new(
-                    run.task.clone(),
-                    scheduled_task.schedule.next_after(now),
-                ))
-                .await?;
         }
 
         Ok(due.len())
     }
 }
+
+/// The error of [`TaskRunner::queue`] for a task the project doesn't have.
+#[derive(Debug, thiserror::Error)]
+#[error("`{0}` is not a queued task of the project")]
+struct UnknownTask(String);
 
 /// Runs the tasks of a project in the background while it is running.
 #[derive(Debug)]
@@ -727,6 +1072,33 @@ mod tests {
     #[should_panic(expected = "at least a millisecond")]
     fn every_needs_an_interval() {
         let _ = Schedule::every(Duration::ZERO);
+    }
+
+    #[test]
+    fn retries_wait_longer_each_time() {
+        assert_eq!(retry_delay(1), Duration::from_secs(30));
+        assert_eq!(retry_delay(2), Duration::from_mins(2));
+        assert_eq!(retry_delay(3), Duration::from_mins(8));
+        // no overflow, however many attempts
+        assert!(retry_delay(u32::MAX) > Duration::from_hours(24 * 365));
+    }
+
+    #[cot::test]
+    async fn memory_backend_replaces_a_run_with_the_same_key() {
+        let backend = MemoryTaskBackend::new();
+        let now = ts("2026-10-25T12:00:00Z");
+        backend
+            .enqueue(TaskRun::new("a", now).with_key("a/1"))
+            .await
+            .unwrap();
+        backend.enqueue(TaskRun::new("a", now)).await.unwrap();
+        let replacement = TaskRun::new("a", now - 1.minute()).with_key("a/1");
+        backend.enqueue(replacement.clone()).await.unwrap();
+
+        assert_eq!(
+            backend.take_due(now).await.unwrap(),
+            [replacement, TaskRun::new("a", now)]
+        );
     }
 
     #[cot::test]

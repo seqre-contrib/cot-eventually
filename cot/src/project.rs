@@ -72,7 +72,8 @@ use crate::response::{IntoResponse, Response};
 use crate::router::{Route, Router, RouterService};
 use crate::static_files::StaticFile;
 use crate::tasks::{
-    Clock, MemoryTaskBackend, ScheduledTask, SystemClock, TaskBackend, TaskRunner, Worker,
+    Clock, MemoryTaskBackend, QueuedTask, ScheduledTask, SystemClock, TaskBackend, TaskRunner,
+    Worker,
 };
 use crate::utils::accept_header_parser::AcceptHeaderParser;
 use crate::{Body, Error, cli, error_page};
@@ -181,6 +182,20 @@ pub trait App: Send + Sync {
     /// The names of the tasks of all apps must be unique; the project panics
     /// at startup otherwise.
     fn scheduled_tasks(&self) -> Vec<ScheduledTask> {
+        vec![]
+    }
+
+    /// Returns the tasks that the app runs each time they are queued. By
+    /// default, it returns an empty list.
+    ///
+    /// Runs are queued with [`TaskRunner::queue`], or with
+    /// [`tasks::db::queue`](crate::tasks::db::queue) in a database
+    /// transaction. See the [`tasks`](crate::tasks) module for details and an
+    /// example.
+    ///
+    /// The names of the tasks of all apps, scheduled or queued, must be
+    /// unique; the project panics at startup otherwise.
+    fn queued_tasks(&self) -> Vec<QueuedTask> {
         vec![]
     }
 }
@@ -1490,10 +1505,17 @@ impl Bootstrapper<WithCache> {
             .iter()
             .flat_map(|app| app.scheduled_tasks())
             .collect();
+        let queued_tasks = self
+            .context
+            .apps
+            .iter()
+            .flat_map(|app| app.queued_tasks())
+            .collect();
         let tasks = TaskRunner::new(
             self.project.clock(),
             self.project.task_backend(&self.context),
             scheduled_tasks,
+            queued_tasks,
         )
         .await?;
         let context = self.context.with_auth(auth_backend, tasks);
