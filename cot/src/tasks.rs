@@ -2,9 +2,9 @@
 //!
 //! Background tasks are work that a project does outside of handling
 //! requests. Currently, these are scheduled tasks: tasks that run at given
-//! times, such as a cleanup every night. Apps declare them in
-//! [`App::scheduled_tasks`](crate::App::scheduled_tasks), and a running
-//! project runs each one when it is due.
+//! times, such as a cleanup every night or a check every few minutes. Apps
+//! declare them in [`App::scheduled_tasks`](crate::App::scheduled_tasks), and a
+//! running project runs each one when it is due.
 //!
 //! Whether a task is due is checked against the project's [`Clock`], which
 //! the project can replace through [`Project::clock`](crate::Project::clock).
@@ -221,6 +221,7 @@ pub struct Schedule(ScheduleKind);
 #[derive(Debug, Clone)]
 enum ScheduleKind {
     Daily { time: Time, time_zone: TimeZone },
+    Every(Duration),
 }
 
 impl Schedule {
@@ -246,12 +247,49 @@ impl Schedule {
         Self(ScheduleKind::Daily { time, time_zone })
     }
 
+    /// Runs at a fixed interval, at every multiple of `interval` since the
+    /// Unix epoch.
+    ///
+    /// Runs line up with the interval, not with when the project started: a
+    /// task that runs every 5 minutes runs at 12:00, 12:05 and so on.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval` is shorter than a millisecond, or longer than
+    /// the range of [`Timestamp`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use cot::tasks::Schedule;
+    /// use jiff::Timestamp;
+    ///
+    /// let schedule = Schedule::every(Duration::from_mins(5));
+    /// let after: Timestamp = "2026-10-25T12:03:00Z".parse()?;
+    ///
+    /// assert_eq!(
+    ///     schedule.next_after(after),
+    ///     "2026-10-25T12:05:00Z".parse::<Timestamp>()?
+    /// );
+    /// # Ok::<(), jiff::Error>(())
+    /// ```
+    #[must_use]
+    pub fn every(interval: Duration) -> Self {
+        assert!(
+            interval >= Duration::from_millis(1),
+            "the interval of a schedule should be at least a millisecond"
+        );
+        Self(ScheduleKind::Every(interval))
+    }
+
     /// Returns the first time after `after` when the schedule is due.
     ///
     /// # Panics
     ///
     /// Panics if that time is outside the range of [`Timestamp`], which can
-    /// only happen within a day of its end.
+    /// only happen within a day, or an interval, of its end.
     ///
     /// # Examples
     ///
@@ -288,6 +326,13 @@ impl Schedule {
                     }
                     date = date.tomorrow().expect(OUT_OF_RANGE);
                 }
+            }
+            ScheduleKind::Every(interval) => {
+                let interval = i64::try_from(interval.as_millis()).expect(OUT_OF_RANGE);
+                let next = (after.as_millisecond().div_euclid(interval) + 1)
+                    .checked_mul(interval)
+                    .expect(OUT_OF_RANGE);
+                Timestamp::from_millisecond(next).expect(OUT_OF_RANGE)
             }
         }
     }
@@ -657,6 +702,31 @@ mod tests {
                 .parse::<Zoned>()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn every_next_after() {
+        let schedule = Schedule::every(Duration::from_mins(5));
+
+        assert_eq!(
+            schedule.next_after(ts("2026-10-25T12:03:00Z")),
+            ts("2026-10-25T12:05:00Z")
+        );
+        // strictly after: a run due now isn't due again right away
+        assert_eq!(
+            schedule.next_after(ts("2026-10-25T12:05:00Z")),
+            ts("2026-10-25T12:10:00Z")
+        );
+        assert_eq!(
+            schedule.next_after(ts("1969-12-31T23:58:00Z")),
+            ts("1970-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "at least a millisecond")]
+    fn every_needs_an_interval() {
+        let _ = Schedule::every(Duration::ZERO);
     }
 
     #[cot::test]
