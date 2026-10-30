@@ -125,6 +125,10 @@ impl SymbolResolver {
             for arg in &mut args.args {
                 self.resolve_generic_argument(arg, self_reference);
             }
+            // a type written over several lines, as rustfmt writes a long one
+            // in a generated migration, ends its arguments with a
+            // comma; it's the same type without it
+            args.args.pop_punct();
         }
     }
 
@@ -571,5 +575,23 @@ const MY_CONSTANT: u8 = 42;
             }
         };
         assert_eq!(actual.into_token_stream().to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn import_resolver_trailing_comma() {
+        let resolver = SymbolResolver::new(vec![VisibleSymbol::new_use(
+            "LimitedString",
+            "cot::db::LimitedString",
+        )]);
+
+        let mut on_one_line = parse_quote! { LimitedString<{ crate::MAX_LENGTH }> };
+        let mut over_lines = parse_quote! {
+            cot::db::LimitedString<
+                { crate::MAX_LENGTH },
+            >
+        };
+        resolver.resolve(&mut on_one_line, None);
+        resolver.resolve(&mut over_lines, None);
+        assert_eq!(on_one_line, over_lines);
     }
 }
