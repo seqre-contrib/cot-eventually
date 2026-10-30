@@ -375,6 +375,7 @@ impl MigrationGenerator {
         let symbol_resolver = SymbolResolver::from_file(&file, &path);
 
         let mut migration_models = Vec::new();
+        let removed_tables = Self::removed_tables(&file);
         for item in file.items {
             if let syn::Item::Struct(mut item) = item {
                 for attr in &item.attrs.clone() {
@@ -413,7 +414,7 @@ impl MigrationGenerator {
             }
         }
 
-        if !migration_models.is_empty() {
+        if !migration_models.is_empty() || !removed_tables.is_empty() {
             let migration_name = path
                 .file_stem()
                 .with_context(|| format!("unable to get migration file name: {}", path.display()))?
@@ -423,10 +424,92 @@ impl MigrationGenerator {
                 app_name: self.crate_name.clone(),
                 name: migration_name,
                 models: migration_models,
+                removed_tables,
             });
         }
 
         Ok(())
+    }
+
+    /// Returns the names of the tables that the `RemoveModel` operations of a
+    /// migration file remove, in the order they are removed.
+    fn removed_tables(file: &syn::File) -> Vec<String> {
+        let mut tables = Vec::new();
+        for item in &file.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            let is_migration = item.trait_.as_ref().is_some_and(|(path, _)| {
+                path.segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "Migration")
+            });
+            if !is_migration {
+                continue;
+            }
+            for impl_item in &item.items {
+                let syn::ImplItem::Const(constant) = impl_item else {
+                    continue;
+                };
+                if constant.ident != "OPERATIONS" {
+                    continue;
+                }
+                let mut operations = &constant.expr;
+                if let syn::Expr::Reference(reference) = operations {
+                    operations = &reference.expr;
+                }
+                let syn::Expr::Array(operations) = operations else {
+                    continue;
+                };
+                tables.extend(operations.elems.iter().filter_map(Self::removed_table));
+            }
+        }
+        tables
+    }
+
+    /// Returns the table name of an operation expression if it is a
+    /// `RemoveModel` operation, such as
+    /// `Operation::remove_model().table_name(Identifier::new("app__model"))...
+    /// `.
+    fn removed_table(operation: &syn::Expr) -> Option<String> {
+        let mut table_name = None;
+        let mut expr = operation;
+        loop {
+            match expr {
+                syn::Expr::MethodCall(call) => {
+                    if call.method == "table_name" {
+                        table_name = call.args.first().and_then(Self::identifier_name);
+                    }
+                    expr = &call.receiver;
+                }
+                syn::Expr::Call(call) => {
+                    let syn::Expr::Path(function) = &*call.func else {
+                        return None;
+                    };
+                    let is_remove_model = function
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|segment| segment.ident == "remove_model");
+                    return if is_remove_model { table_name } else { None };
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Returns the name in an `Identifier::new("name")` expression.
+    fn identifier_name(expr: &syn::Expr) -> Option<String> {
+        let syn::Expr::Call(call) = expr else {
+            return None;
+        };
+        match call.args.first() {
+            Some(syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(name),
+                ..
+            })) => Some(name.value()),
+            _ => None,
+        }
     }
 
     fn model_args_from_attr(path: &Path, attr: &syn::Attribute) -> Result<ModelArgs, ParsingError> {
@@ -934,6 +1017,11 @@ impl MigrationProcessor {
     fn latest_models(&self) -> Vec<ModelInSource> {
         let mut migration_models: HashMap<String, &ModelInSource> = HashMap::new();
         for migration in &self.migrations {
+            // a model removed in a migration is gone from the ones after it,
+            // unless a migration creates it again
+            for table_name in &migration.removed_tables {
+                migration_models.remove(table_name);
+            }
             for model in &migration.models {
                 migration_models.insert(model.model.table_name.clone(), model);
             }
@@ -1361,6 +1449,8 @@ struct Migration {
     app_name: String,
     name: String,
     models: Vec<ModelInSource>,
+    /// The tables of the models the migration removes.
+    removed_tables: Vec<String>,
 }
 
 impl DynMigration for Migration {
@@ -1635,6 +1725,7 @@ mod tests {
             app_name: "app1".to_string(),
             name: "m0001_initial".to_string(),
             models: vec![],
+            removed_tables: vec![],
         }];
         let processor = MigrationProcessor::new(migrations).unwrap();
 
@@ -1654,6 +1745,7 @@ mod tests {
             app_name: "app1".to_string(),
             name: "m_0001_initial".to_string(),
             models: vec![],
+            removed_tables: vec![],
         }];
         let processor = MigrationProcessor::new(migrations).unwrap();
 

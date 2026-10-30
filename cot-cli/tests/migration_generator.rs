@@ -160,6 +160,45 @@ fn create_models_foreign_key_two_migrations() {
     assert_eq!(table_name, "cot__child");
 }
 
+/// A model removed in one migration stays removed in the next ones, so they
+/// don't remove it again.
+#[test]
+fn remove_model_stays_removed() {
+    let generator = test_generator();
+    let parse = |name: &str, src: &str| SourceFile::parse(PathBuf::from(name), src).unwrap();
+
+    let src = include_str!("migration_generator/remove_model/step_1.rs");
+    let first = generator
+        .generate_migrations_as_source_from_files(vec![parse("main.rs", src)])
+        .unwrap()
+        .unwrap();
+
+    let src = include_str!("migration_generator/remove_model/step_2.rs");
+    let second = generator
+        .generate_migrations_as_source_from_files(vec![
+            parse("main.rs", src),
+            parse(&first.name, &first.content),
+        ])
+        .unwrap()
+        .unwrap();
+    assert!(second.name.starts_with("m_0002_"));
+
+    let src = include_str!("migration_generator/remove_model/step_3.rs");
+    let third = generator
+        .generate_migrations_as_generated_from_files(vec![
+            parse("main.rs", src),
+            parse(&first.name, &first.content),
+            parse(&second.name, &second.content),
+        ])
+        .unwrap()
+        .unwrap();
+
+    assert!(third.migration_name.starts_with("m_0003_"));
+    assert_eq!(third.operations.len(), 1);
+    let (table_name, _fields) = unwrap_create_model(&third.operations[0]);
+    assert_eq!(table_name, "cot__added");
+}
+
 #[test]
 fn create_model_keywords() {
     let generator = test_generator();
