@@ -413,9 +413,18 @@ async fn queued_tasks_run_once_with_their_payload() {
 async fn a_queued_run_replaces_the_waiting_one_with_its_key() {
     let (mut client, clock, sends, _) = queue_client().await;
     let due = "2026-10-25T13:00:00Z";
-    queue(&mut client, "queue::send", due, "first", "send/1").await;
-    queue(&mut client, "queue::send", due, "second", "send/1").await;
-    queue(&mut client, "queue::send", due, "other", "send/2").await;
+    assert_eq!(
+        queue(&mut client, "queue::send", due, "first", "send-1").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        queue(&mut client, "queue::send", due, "second", "send-1").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        queue(&mut client, "queue::send", due, "other", "send-2").await,
+        StatusCode::OK
+    );
 
     clock.set(due);
     assert_eq!(client.run_due_tasks().await.unwrap(), 2);
