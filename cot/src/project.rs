@@ -1661,6 +1661,11 @@ impl Bootstrapper<WithCache> {
     /// # Ok(())
     /// # }
     /// ```
+    #[expect(
+        clippy::unused_async,
+        reason = "for consistency with other Bootstrapper::boot methods"
+    )]
+    #[expect(clippy::unused_async_trait_impl)]
     pub async fn boot(self) -> cot::Result<Bootstrapper<Initialized>> {
         let mut state = AppState::new();
         self.project.register_state(&mut state, &self.context);
@@ -1690,8 +1695,7 @@ impl Bootstrapper<WithCache> {
             self.project.task_backend(&self.context),
             scheduled_tasks,
             queued_tasks,
-        )
-        .await?;
+        );
         let context = self.context.with_auth_and_state(auth_backend, state, tasks);
 
         Ok(Bootstrapper {
