@@ -199,6 +199,22 @@ Currently, Cot supports the following database engines:
 * PostgreSQL
 * MySQL
 
+### SQLite options
+
+SQLite has a few settings that are worth changing for a web application, which can't be set through the URL. You can set them in the `[database.sqlite]` table; they are applied to every connection Cot opens:
+
+```toml
+[database]
+url = "sqlite://db.sqlite3?mode=rwc"
+
+[database.sqlite]
+journal_mode = "wal"    # readers don't block the writer and vice versa
+synchronous = "normal"  # faster than the default "full", and safe with WAL
+busy_timeout = "10s"    # how long to wait for a lock before failing
+```
+
+See [`SqliteConfig`](struct@cot::config::SqliteConfig) for all the options.
+
 As an alternative to setting the database configuration in the `TOML` file, you can also set it programmatically in the [`config`](trait@cot::project::Project#method.config) method of your project.
 Note that when you do this, the config values from the `TOML` file will be entirely ignored. Here's an example of how you can do that:
 

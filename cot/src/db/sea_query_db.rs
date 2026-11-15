@@ -16,7 +16,10 @@ macro_rules! impl_sea_query_db_backend {
         impl $db_name {
             pub(super) async fn new(url: &str) -> crate::db::Result<Self> {
                 let db_connection = <$pool_ty>::connect(url).await?;
+                Self::from_pool(db_connection).await
+            }
 
+            async fn from_pool(db_connection: $pool_ty) -> crate::db::Result<Self> {
                 let db = Self { db_connection };
                 db.init().await?;
                 Ok(db)
