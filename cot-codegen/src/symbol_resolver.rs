@@ -133,12 +133,29 @@ impl SymbolResolver {
         arg: &mut syn::GenericArgument,
         self_reference: Option<&String>,
     ) {
-        if let syn::GenericArgument::Type(syn::Type::Path(path)) = arg {
-            if let Some(new_arg) = self.try_resolve_generic_const(path) {
-                *arg = new_arg;
-            } else {
-                self.resolve_type_path(path, self_reference);
+        match arg {
+            syn::GenericArgument::Type(syn::Type::Path(path)) => {
+                if let Some(new_arg) = self.try_resolve_generic_const(path) {
+                    *arg = new_arg;
+                } else {
+                    self.resolve_type_path(path, self_reference);
+                }
             }
+            syn::GenericArgument::Const(expr) => {
+                // A constant resolved to its full path is written to migrations
+                // in braces, as in `{ crate::MAX_LENGTH }`, which is how Rust
+                // requires it to be written. Unwrap it, so that it is the same
+                // as the constant resolved from the model's source.
+                if let syn::Expr::Block(block) = expr
+                    && block.attrs.is_empty()
+                    && block.label.is_none()
+                    && let [syn::Stmt::Expr(syn::Expr::Path(path), None)] =
+                        block.block.stmts.as_slice()
+                {
+                    *expr = syn::Expr::Path(path.clone());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -394,6 +411,23 @@ mod tests {
 
     use super::*;
     use crate::symbol_resolver::VisibleSymbolKind;
+
+    #[test]
+    fn braced_const_generic_argument() {
+        let resolver = SymbolResolver::new(vec![VisibleSymbol::new(
+            "MAX_LENGTH",
+            "crate::MAX_LENGTH",
+            VisibleSymbolKind::Const,
+        )]);
+
+        // as written in a model, and as written to a migration
+        let mut from_model: syn::Type = parse_quote!(LimitedString<MAX_LENGTH>);
+        resolver.resolve(&mut from_model, None);
+        let mut from_migration: syn::Type = parse_quote!(LimitedString<{ crate::MAX_LENGTH }>);
+        resolver.resolve(&mut from_migration, None);
+
+        assert_eq!(from_model, from_migration);
+    }
 
     #[test]
     fn imports() {
