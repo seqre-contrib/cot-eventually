@@ -211,6 +211,7 @@ url = "sqlite://db.sqlite3?mode=rwc"
 journal_mode = "wal"    # readers don't block the writer and vice versa
 synchronous = "normal"  # faster than the default "full", and safe with WAL
 busy_timeout = "10s"    # how long to wait for a lock before failing
+transaction_behavior = "immediate"  # transactions wait for each other instead of failing
 ```
 
 See [`SqliteConfig`](struct@cot::config::SqliteConfig) for all the options.
