@@ -320,6 +320,27 @@ Route::with_api_handler(
 
 Each method will be properly documented in the OpenAPI specification.
 
+### Grouping Operations with Tags
+
+Tools such as Swagger UI group operations by their [tags](https://spec.openapis.org/oas/v3.1.0#operation-object). You can tag every method of a single route with [`ApiMethodRouter::tag`](struct@cot::router::method::openapi::ApiMethodRouter#method.tag) or [`ApiMethodRouter::tags`](struct@cot::router::method::openapi::ApiMethodRouter#method.tags), or every API route of a router, nested routers included, with [`Router::api_tags`](struct@cot::router::Router#method.api_tags):
+
+```rust
+# async fn list_items() -> cot::Result<Response> { todo!() }
+# async fn create_item() -> cot::Result<Response> { todo!() }
+# async fn search() -> cot::Result<Response> { todo!() }
+# use cot::router::method::openapi::api_get;
+# fn foo() {
+let items = Router::with_urls([
+    Route::with_api_handler("/items", api_get(list_items).post(create_item)),
+    // listed under both "items" and "search"
+    Route::with_api_handler("/items/search", api_get(search).tag("search")),
+])
+.api_tags(["items"]);
+# }
+```
+
+A router's tags come before those of the routers nested in it and of its routes. To describe the tags or set the order of the groups, add them to the `tags` field of the generated specification.
+
 ### Implement your own OpenAPI extractor
 
 In order for your parameter or response type to generate OpenAPI specification, you need to implement the [`ApiOperationPart`](https://docs.rs/cot/0.5/cot/openapi/trait.ApiOperationPart.html) trait. You can study their implementations to understand how to design your own:

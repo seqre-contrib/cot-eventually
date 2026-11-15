@@ -207,6 +207,111 @@ fn api_method_router() {
     }
 }
 
+/// Returns the tags of the operation for `method` at `path`.
+fn operation_tags(spec: &aide::openapi::OpenApi, path: &str, method: &str) -> Vec<String> {
+    let path_item = spec.paths.as_ref().unwrap().paths[path].as_item().unwrap();
+    let (_, operation) = path_item
+        .iter()
+        .find(|(name, _)| *name == method)
+        .unwrap_or_else(|| panic!("no {method} operation at {path}"));
+    operation.tags.clone()
+}
+
+#[test]
+fn api_method_router_tags() {
+    let router = Router::with_urls([
+        Route::with_api_handler(
+            "/items",
+            api_get(test_handler)
+                .tag("items")
+                .post(test_json_handler)
+                .tags(["admin", "items"]),
+        ),
+        Route::with_api_handler("/untagged", api_get(test_handler)),
+    ]);
+
+    let spec = router.as_api();
+
+    assert_eq!(operation_tags(&spec, "/items", "get"), ["items", "admin"]);
+    assert_eq!(operation_tags(&spec, "/items", "post"), ["items", "admin"]);
+    assert_eq!(
+        operation_tags(&spec, "/untagged", "get"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn api_router_tags_nested() {
+    let inner = Router::with_urls([
+        Route::with_api_handler("/tagged", api_get(test_handler).tag("route")),
+        Route::with_api_handler("/plain", api_get(test_handler)),
+        // non-API routes have no operations to tag
+        Route::with_handler("/html", test_handler),
+    ])
+    .api_tags(["inner"]);
+    let outer = Router::with_urls([
+        Route::with_router("/inner", inner),
+        Route::with_api_handler("/outer", api_get(test_handler).tag("outer")),
+    ])
+    .api_tags(["outer"]);
+    let root = Router::with_urls([Route::with_router("/api", outer)]);
+
+    let spec = root.as_api();
+
+    assert_eq!(
+        operation_tags(&spec, "/api/inner/tagged", "get"),
+        ["outer", "inner", "route"]
+    );
+    assert_eq!(
+        operation_tags(&spec, "/api/inner/plain", "get"),
+        ["outer", "inner"]
+    );
+    assert_eq!(operation_tags(&spec, "/api/outer", "get"), ["outer"]);
+}
+
+#[test]
+fn api_router_tags_survive_merging() {
+    // both nest a router at `/v1`, so merging them merges those too
+    let versioned = |path: &str| {
+        Router::with_urls([Route::with_router(
+            "/v1",
+            Router::with_urls([Route::with_api_handler(path, api_get(test_handler))]),
+        )])
+    };
+    let items = versioned("/items").api_tags(["items"]);
+    let users = versioned("/users").api_tags(["users"]);
+    let untagged = Router::with_urls([Route::with_api_handler("/health", api_get(test_handler))]);
+    let api = Router::with_urls([
+        Route::with_router("", items),
+        Route::with_router("", users),
+        Route::with_router("", untagged),
+    ])
+    .api_tags(["api"]);
+    let root = Router::with_urls([
+        Route::with_router("/api", api),
+        Route::with_router(
+            "/api",
+            Router::with_urls([Route::with_api_handler("/other", api_get(test_handler))]),
+        ),
+    ]);
+
+    let spec = root.as_api();
+
+    assert_eq!(
+        operation_tags(&spec, "/api/v1/items", "get"),
+        ["api", "items"]
+    );
+    assert_eq!(
+        operation_tags(&spec, "/api/v1/users", "get"),
+        ["api", "users"]
+    );
+    assert_eq!(operation_tags(&spec, "/api/health", "get"), ["api"]);
+    assert_eq!(
+        operation_tags(&spec, "/api/other", "get"),
+        Vec::<String>::new()
+    );
+}
+
 #[cot::test]
 async fn no_api_in_method_router() {
     let router = ApiMethodRouter::new()
