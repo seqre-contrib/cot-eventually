@@ -504,6 +504,39 @@ where
     Inner(handler, PhantomData)
 }
 
+/// Returns `outer` followed by every tag of `inner` that `outer` doesn't have
+/// yet.
+pub(crate) fn merge_tags(outer: &[String], inner: &[String]) -> Vec<String> {
+    let mut tags = Vec::with_capacity(outer.len() + inner.len());
+    for tag in outer.iter().chain(inner) {
+        if !tags.contains(tag) {
+            tags.push(tag.clone());
+        }
+    }
+    tags
+}
+
+/// Puts `tags` in front of the tags of every operation in `path_item`.
+pub(crate) fn add_path_item_tags(path_item: &mut PathItem, tags: &[String]) {
+    if tags.is_empty() {
+        return;
+    }
+
+    let operations = [
+        &mut path_item.get,
+        &mut path_item.put,
+        &mut path_item.post,
+        &mut path_item.delete,
+        &mut path_item.options,
+        &mut path_item.head,
+        &mut path_item.patch,
+        &mut path_item.trace,
+    ];
+    for operation in operations.into_iter().flatten() {
+        operation.tags = merge_tags(tags, &operation.tags);
+    }
+}
+
 /// A wrapper type that allows using non-OpenAPI handlers and request parameters
 /// in OpenAPI routes.
 ///
