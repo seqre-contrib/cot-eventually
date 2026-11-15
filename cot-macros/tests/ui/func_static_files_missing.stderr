@@ -1,0 +1,5 @@
+error: could not find static file or directory `css/missing.css` in the `static` directory
+ --> tests/ui/func_static_files_missing.rs:4:27
+  |
+4 |     let _ = static_files!("css/missing.css");
+  |                           ^^^^^^^^^^^^^^^^^
