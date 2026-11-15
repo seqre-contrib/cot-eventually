@@ -1,10 +1,10 @@
 use cot::App;
 use cot::auth::db::DatabaseUserApp;
 use cot::db::migrations::{
-    Field, Migration, MigrationDependency, MigrationEngine, Operation, SyncDynMigration,
-    wrap_migrations,
+    DefaultValue, Field, Migration, MigrationDependency, MigrationEngine, Operation,
+    SyncDynMigration, wrap_migrations,
 };
-use cot::db::{Auto, Database, DatabaseField, Identifier};
+use cot::db::{Auto, Database, DatabaseField, Identifier, Model};
 use cot::session::db::SessionApp;
 use cot::test::TestDatabase;
 use cot_macros::{model, query};
@@ -436,4 +436,100 @@ async fn test_migration_engine_rollback_zero(test_db: &mut TestDatabase) {
         ],
     )
     .await;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[model(table_name = "default_value_model")]
+struct DefaultValueBefore {
+    #[model(primary_key)]
+    id: Auto<i32>,
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[model(table_name = "default_value_model")]
+struct DefaultValueAfter {
+    #[model(primary_key)]
+    id: Auto<i32>,
+    name: String,
+    #[model(default = true)]
+    is_active: bool,
+    #[model(default = -3)]
+    retries: i64,
+    #[model(default = 0.5)]
+    ratio: f64,
+    #[model(default = "none")]
+    label: String,
+}
+
+const CREATE_DEFAULT_VALUE_MODEL: Operation = Operation::create_model()
+    .table_name(Identifier::new("cot__default_value_model"))
+    .fields(&[
+        Field::new(Identifier::new("id"), <i32 as DatabaseField>::TYPE)
+            .primary_key()
+            .auto(),
+        Field::new(Identifier::new("name"), <String as DatabaseField>::TYPE),
+    ])
+    .build();
+
+const ADD_DEFAULT_VALUE_FIELDS: [Operation; 4] = [
+    Operation::add_field()
+        .table_name(Identifier::new("cot__default_value_model"))
+        .field(
+            Field::new(Identifier::new("is_active"), <bool as DatabaseField>::TYPE)
+                .default_value(DefaultValue::Bool(true)),
+        )
+        .build(),
+    Operation::add_field()
+        .table_name(Identifier::new("cot__default_value_model"))
+        .field(
+            Field::new(Identifier::new("retries"), <i64 as DatabaseField>::TYPE)
+                .default_value(DefaultValue::Int(-3)),
+        )
+        .build(),
+    Operation::add_field()
+        .table_name(Identifier::new("cot__default_value_model"))
+        .field(
+            Field::new(Identifier::new("ratio"), <f64 as DatabaseField>::TYPE)
+                .default_value(DefaultValue::Float(0.5)),
+        )
+        .build(),
+    Operation::add_field()
+        .table_name(Identifier::new("cot__default_value_model"))
+        .field(
+            Field::new(Identifier::new("label"), <String as DatabaseField>::TYPE)
+                .default_value(DefaultValue::Text("none")),
+        )
+        .build(),
+];
+
+#[cot_macros::dbtest]
+async fn test_add_non_nullable_field_with_default(test_db: &mut TestDatabase) {
+    let database = test_db.database();
+    CREATE_DEFAULT_VALUE_MODEL
+        .forwards(&database)
+        .await
+        .unwrap();
+    let mut existing = DefaultValueBefore {
+        id: Auto::auto(),
+        name: "existing".to_owned(),
+    };
+    existing.save(&database).await.unwrap();
+
+    for operation in &ADD_DEFAULT_VALUE_FIELDS {
+        operation.forwards(&database).await.unwrap();
+    }
+
+    let rows = DefaultValueAfter::objects().all(&database).await.unwrap();
+    assert_eq!(
+        rows,
+        [DefaultValueAfter {
+            id: existing.id,
+            name: "existing".to_owned(),
+            is_active: true,
+            retries: -3,
+            ratio: 0.5,
+            label: "none".to_owned(),
+        }]
+    );
 }

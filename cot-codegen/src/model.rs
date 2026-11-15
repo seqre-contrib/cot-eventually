@@ -142,6 +142,62 @@ impl ModelOpts {
     }
 }
 
+/// The value of a `#[model(default = ...)]` attribute: a boolean, number or
+/// string literal. Numbers can be negative.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DefaultValue {
+    negative: bool,
+    lit: syn::Lit,
+}
+
+impl FromMeta for DefaultValue {
+    fn from_expr(expr: &syn::Expr) -> darling::Result<Self> {
+        let unsupported = || {
+            darling::Error::custom(
+                "`default` must be a boolean, number or string literal, such as `false`, `-1`, \
+                 `0.5` or `\"text\"`",
+            )
+            .with_span(expr)
+        };
+        let (negative, lit) = match expr {
+            syn::Expr::Lit(expr) => (false, &expr.lit),
+            syn::Expr::Unary(syn::ExprUnary {
+                op: syn::UnOp::Neg(_),
+                expr,
+                ..
+            }) => match &**expr {
+                syn::Expr::Lit(expr) => (true, &expr.lit),
+                _ => return Err(unsupported()),
+            },
+            syn::Expr::Group(group) => return Self::from_expr(&group.expr),
+            _ => return Err(unsupported()),
+        };
+        match lit {
+            syn::Lit::Int(_) | syn::Lit::Float(_) => {}
+            syn::Lit::Bool(_) | syn::Lit::Str(_) if !negative => {}
+            _ => return Err(unsupported()),
+        }
+        Ok(Self {
+            negative,
+            lit: lit.clone(),
+        })
+    }
+}
+
+impl ToTokens for DefaultValue {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let lit = &self.lit;
+        let sign = self.negative.then(|| quote! {-});
+        let variant = match lit {
+            syn::Lit::Bool(_) => quote! {Bool},
+            syn::Lit::Int(_) => quote! {Int},
+            syn::Lit::Float(_) => quote! {Float},
+            _ => quote! {Text},
+        };
+        quote! {::cot::db::migrations::DefaultValue::#variant(#sign #lit)}.to_tokens(tokens);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, FromMeta)]
 pub struct ForeignKeyArgs {
     #[darling(default)]
@@ -217,6 +273,7 @@ pub struct FieldOpts {
     pub unique: darling::util::Flag,
     pub field_name: Option<String>,
     pub foreign_key: Option<ForeignKeyArgs>,
+    pub default: Option<DefaultValue>,
 }
 
 impl FieldOpts {
@@ -354,6 +411,12 @@ impl FieldOpts {
         }
 
         let is_primary_key = self.primary_key.is_present();
+        if is_primary_key && self.default.is_some() {
+            return Err(syn::Error::new(
+                self.ident.span(),
+                "a primary key can't have a `default`",
+            ));
+        }
         let mut resolved_ty = self.ty.clone();
         symbol_resolver.resolve(&mut resolved_ty, self_reference);
         Ok(Field {
@@ -364,6 +427,7 @@ impl FieldOpts {
             primary_key: is_primary_key,
             foreign_key,
             unique: self.unique.is_present(),
+            default: self.default.clone(),
         })
     }
 }
@@ -401,6 +465,8 @@ pub struct Field {
     /// determined not to be a foreign key.
     pub foreign_key: Option<ForeignKeySpec>,
     pub unique: bool,
+    /// The value of the field's `#[model(default = ...)]` attribute.
+    pub default: Option<DefaultValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -659,6 +725,74 @@ mod tests {
     }
 
     #[test]
+    fn field_opts_default() {
+        let input: syn::Field = parse_quote! {
+            #[model(default = -3)]
+            retries: i32
+        };
+        let field_opts = FieldOpts::from_field(&input).unwrap();
+        let field = field_opts
+            .as_field(&SymbolResolver::new(vec![]), Some(&"TestModel".to_string()))
+            .unwrap();
+        assert_eq!(
+            field.default.to_token_stream().to_string(),
+            quote! {::cot::db::migrations::DefaultValue::Int(-3)}.to_string()
+        );
+    }
+
+    #[test]
+    fn default_value_kinds() {
+        let tokens = |expr: syn::Expr| {
+            DefaultValue::from_expr(&expr)
+                .unwrap()
+                .to_token_stream()
+                .to_string()
+        };
+        assert_eq!(
+            tokens(parse_quote!(false)),
+            quote! {::cot::db::migrations::DefaultValue::Bool(false)}.to_string()
+        );
+        assert_eq!(
+            tokens(parse_quote!(0.5)),
+            quote! {::cot::db::migrations::DefaultValue::Float(0.5)}.to_string()
+        );
+        assert_eq!(
+            tokens(parse_quote!("none")),
+            quote! {::cot::db::migrations::DefaultValue::Text("none")}.to_string()
+        );
+    }
+
+    #[test]
+    fn default_value_not_a_literal() {
+        for expr in [
+            parse_quote!(i32::MAX),
+            parse_quote!(-true),
+            parse_quote!(b'a'),
+        ] {
+            let expr: syn::Expr = expr;
+            let err = DefaultValue::from_expr(&expr).unwrap_err();
+            assert!(
+                err.to_string()
+                    .starts_with("`default` must be a boolean, number or string literal"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_opts_default_on_primary_key() {
+        let input: syn::Field = parse_quote! {
+            #[model(primary_key, default = 1)]
+            id: i32
+        };
+        let field_opts = FieldOpts::from_field(&input).unwrap();
+        let err = field_opts
+            .as_field(&SymbolResolver::new(vec![]), Some(&"TestModel".to_string()))
+            .unwrap_err();
+        assert_eq!(err.to_string(), "a primary key can't have a `default`");
+    }
+
+    #[test]
     fn field_opts_raw_name() {
         let input: syn::Field = parse_quote! {
             r#abstract: String
@@ -831,6 +965,7 @@ mod tests {
             unique: darling::util::Flag::default(),
             field_name: None,
             foreign_key: None,
+            default: None,
         };
 
         assert!(opts.find_type("my_crate::MyContainer", &resolver).is_some());

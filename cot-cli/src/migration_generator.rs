@@ -1339,6 +1339,9 @@ impl Repr for Field {
         if self.unique {
             tokens = quote! { #tokens.unique() }
         }
+        if let Some(default) = &self.default {
+            tokens = quote! { #tokens.default_value(#default) }
+        }
         tokens
     }
 }
@@ -1537,7 +1540,9 @@ impl Error for ParsingError {}
 
 #[cfg(test)]
 mod tests {
-    use cot_codegen::model::{ForeignKeyOnDeletePolicy, ForeignKeyOnUpdatePolicy, ForeignKeySpec};
+    use cot_codegen::model::{
+        DefaultValue, ForeignKeyOnDeletePolicy, ForeignKeyOnUpdatePolicy, ForeignKeySpec,
+    };
 
     use super::*;
 
@@ -1559,6 +1564,7 @@ mod tests {
                         auto_value: false,
                         primary_key: false,
                         unique: false,
+                        default: None,
                         foreign_key: Some(ForeignKeySpec {
                             to_model: parse_quote!(crate::OtherModel),
                             on_delete: Some($on_delete),
@@ -1684,6 +1690,7 @@ mod tests {
                     auto_value: false,
                     primary_key: false,
                     unique: false,
+                    default: None,
                     foreign_key: Some(ForeignKeySpec {
                         to_model: parse_quote!(Table1),
                         on_delete: Some(ForeignKeyOnDeletePolicy::Cascade),
@@ -1726,6 +1733,7 @@ mod tests {
                     auto_value: false,
                     primary_key: false,
                     unique: false,
+                    default: None,
                     foreign_key: Some(ForeignKeySpec {
                         to_model: parse_quote!(Table2),
                         on_delete: Some(ForeignKeyOnDeletePolicy::Cascade),
@@ -1743,6 +1751,7 @@ mod tests {
                     auto_value: false,
                     primary_key: false,
                     unique: false,
+                    default: None,
                     foreign_key: Some(ForeignKeySpec {
                         to_model: parse_quote!(Table1),
                         on_delete: Some(ForeignKeyOnDeletePolicy::Cascade),
@@ -1792,6 +1801,7 @@ mod tests {
                 auto_value: false,
                 primary_key: false,
                 unique: false,
+                default: None,
                 foreign_key: Some(ForeignKeySpec {
                     to_model: parse_quote!(Table2),
                     on_delete: Some(ForeignKeyOnDeletePolicy::Cascade),
@@ -1849,6 +1859,7 @@ mod tests {
                 auto_value: false,
                 primary_key: false,
                 unique: false,
+                default: None,
                 foreign_key: Some(ForeignKeySpec {
                     to_model: parse_quote!(crate::Table2),
                     on_delete: Some(ForeignKeyOnDeletePolicy::Cascade),
@@ -1880,6 +1891,7 @@ mod tests {
                     auto_value: false,
                     primary_key: false,
                     unique: false,
+                    default: None,
                     foreign_key: Some(ForeignKeySpec {
                         to_model: parse_quote!(my_crate::Table2),
                         on_delete: Some(ForeignKeyOnDeletePolicy::Cascade),
@@ -1897,6 +1909,7 @@ mod tests {
                     auto_value: false,
                     primary_key: false,
                     unique: false,
+                    default: None,
                     foreign_key: Some(ForeignKeySpec {
                         to_model: parse_quote!(crate::Table4),
                         on_delete: Some(ForeignKeyOnDeletePolicy::Cascade),
@@ -1939,6 +1952,7 @@ mod tests {
                     auto_value: true,
                     primary_key: true,
                     unique: false,
+                    default: None,
                     foreign_key: None,
                 },
                 fields: vec![Field {
@@ -1948,6 +1962,7 @@ mod tests {
                     auto_value: false,
                     primary_key: false,
                     unique: false,
+                    default: None,
                     foreign_key: None,
                 }],
             },
@@ -1977,6 +1992,7 @@ mod tests {
                     auto_value: true,
                     primary_key: true,
                     unique: false,
+                    default: None,
                     foreign_key: None,
                 },
                 fields: vec![
@@ -1987,6 +2003,7 @@ mod tests {
                         auto_value: false,
                         primary_key: false,
                         unique: false,
+                        default: None,
                         foreign_key: None,
                     },
                     Field {
@@ -1996,6 +2013,7 @@ mod tests {
                         auto_value: false,
                         primary_key: false,
                         unique: false,
+                        default: None,
                         foreign_key: None,
                     },
                 ],
@@ -2013,6 +2031,7 @@ mod tests {
             auto_value: false,
             primary_key: false,
             unique: false,
+            default: None,
             foreign_key: None,
         };
 
@@ -2162,6 +2181,7 @@ mod tests {
                 auto_value: false,
                 primary_key: false,
                 unique: false,
+                default: None,
                 foreign_key: None,
             }),
         };
@@ -2184,6 +2204,29 @@ mod tests {
         assert!(
             tokens_str.contains("build"),
             "Should call build() but got: {tokens_str}"
+        );
+    }
+
+    #[test]
+    fn repr_for_field_with_default() {
+        let field = Field {
+            name: format_ident!("retries"),
+            column_name: "retries".to_string(),
+            ty: parse_quote!(i32),
+            auto_value: false,
+            primary_key: false,
+            unique: false,
+            default: Some(DefaultValue::from_expr(&parse_quote!(-3)).unwrap()),
+            foreign_key: None,
+        };
+
+        let tokens_str = remove_whitespace(&field.repr().to_string());
+
+        assert!(
+            tokens_str.contains(&remove_whitespace(
+                &".default_value(::cot::db::migrations::DefaultValue::Int(-3))"
+            )),
+            "Should call default_value() but got: {tokens_str}"
         );
     }
 
