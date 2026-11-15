@@ -15,7 +15,8 @@ use schemars::SchemaGenerator;
 
 use crate::RequestHandler;
 use crate::openapi::{
-    AsApiOperation, AsApiRoute, BoxApiRequestHandler, into_box_api_request_handler,
+    AsApiOperation, AsApiRoute, BoxApiRequestHandler, add_path_item_tags,
+    into_box_api_request_handler, merge_tags,
 };
 use crate::router::method::InnerMethodRouter;
 
@@ -93,6 +94,7 @@ use crate::router::method::InnerMethodRouter;
 #[must_use]
 pub struct ApiMethodRouter {
     inner: InnerMethodRouter<InnerApiHandler>,
+    tags: Vec<String>,
 }
 
 macro_rules! define_method {
@@ -208,6 +210,7 @@ impl ApiMethodRouter {
     pub fn new() -> Self {
         Self {
             inner: InnerMethodRouter::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -312,6 +315,83 @@ impl ApiMethodRouter {
         self.inner.fallback = InnerHandler::new(handler);
         self
     }
+
+    /// Add a tag to every operation of this route in the OpenAPI
+    /// specification.
+    ///
+    /// Tools such as Swagger UI group operations by their tags. The tags apply
+    /// to the handlers set both before and after this call.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::json::Json;
+    /// use cot::router::method::openapi::api_get;
+    /// use cot::router::{Route, Router};
+    ///
+    /// async fn list_items() -> Json<Vec<String>> {
+    ///     Json(Vec::new())
+    /// }
+    ///
+    /// async fn create_item(Json(item): Json<String>) -> Json<String> {
+    ///     Json(item)
+    /// }
+    ///
+    /// let router = Router::with_urls([Route::with_api_handler(
+    ///     "/items",
+    ///     api_get(list_items).post(create_item).tag("items"),
+    /// )]);
+    ///
+    /// let spec = router.as_api();
+    /// let path_item = spec.paths.unwrap().paths["/items"]
+    ///     .as_item()
+    ///     .unwrap()
+    ///     .clone();
+    /// assert_eq!(path_item.get.unwrap().tags, ["items"]);
+    /// assert_eq!(path_item.post.unwrap().tags, ["items"]);
+    /// ```
+    pub fn tag(self, tag: impl Into<String>) -> Self {
+        self.tags([tag])
+    }
+
+    /// Add tags to every operation of this route in the OpenAPI specification.
+    ///
+    /// Tools such as Swagger UI group operations by their tags, and an
+    /// operation with more than one tag is listed in each group. The tags
+    /// apply to the handlers set both before and after this call.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::json::Json;
+    /// use cot::router::method::openapi::api_get;
+    /// use cot::router::{Route, Router};
+    ///
+    /// async fn search() -> Json<Vec<String>> {
+    ///     Json(Vec::new())
+    /// }
+    ///
+    /// let router = Router::with_urls([Route::with_api_handler(
+    ///     "/search",
+    ///     api_get(search).tags(["items", "users"]),
+    /// )]);
+    ///
+    /// let spec = router.as_api();
+    /// let path_item = spec.paths.unwrap().paths["/search"]
+    ///     .as_item()
+    ///     .unwrap()
+    ///     .clone();
+    /// assert_eq!(path_item.get.unwrap().tags, ["items", "users"]);
+    /// ```
+    pub fn tags<I, T>(mut self, tags: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        let tags: Vec<String> = tags.into_iter().map(Into::into).collect();
+        self.tags = merge_tags(&self.tags, &tags);
+        self
+    }
 }
 
 impl RequestHandler for ApiMethodRouter {
@@ -348,6 +428,7 @@ impl AsApiRoute for ApiMethodRouter {
         add_method!(path_item, put, PUT);
         add_method!(path_item, trace, TRACE);
 
+        add_path_item_tags(&mut path_item, &self.tags);
         path_item
     }
 }

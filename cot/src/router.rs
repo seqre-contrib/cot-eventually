@@ -222,7 +222,8 @@ impl Router {
                 .urls
                 .iter()
                 .cloned()
-                .map(|r| r.with_app_name_if_unset(existing_router.app_name.clone())),
+                .map(|r| r.with_app_name_if_unset(existing_router.app_name.clone()))
+                .map(|r| r.with_mount_api_tags(existing)),
         );
 
         combined.extend(
@@ -230,7 +231,8 @@ impl Router {
                 .urls
                 .iter()
                 .cloned()
-                .map(|r| r.with_app_name_if_unset(new_router.app_name.clone())),
+                .map(|r| r.with_app_name_if_unset(new_router.app_name.clone()))
+                .map(|r| r.with_mount_api_tags(new)),
         );
 
         let merged_router = Router::try_with_urls(combined)?;
@@ -504,6 +506,61 @@ impl Router {
         self.urls.is_empty()
     }
 
+    /// Adds tags to every API operation of this router in the OpenAPI
+    /// specification, including the operations of nested routers.
+    ///
+    /// Tools such as Swagger UI group operations by their tags. A router's tags
+    /// come before the tags of the routers nested in it and of the routes
+    /// themselves (see
+    /// [`ApiMethodRouter::tags`](crate::router::method::openapi::ApiMethodRouter::tags)).
+    /// They stay attached to the routes when routers mounted at the same path
+    /// are merged.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cot::json::Json;
+    /// use cot::router::method::openapi::api_get;
+    /// use cot::router::{Route, Router};
+    ///
+    /// async fn list_items() -> Json<Vec<String>> {
+    ///     Json(Vec::new())
+    /// }
+    ///
+    /// async fn list_users() -> Json<Vec<String>> {
+    ///     Json(Vec::new())
+    /// }
+    ///
+    /// let items = Router::with_urls([Route::with_api_handler("/items", api_get(list_items))])
+    ///     .api_tags(["items"]);
+    /// let users = Router::with_urls([Route::with_api_handler("/users", api_get(list_users))])
+    ///     .api_tags(["users"]);
+    /// let router = Router::with_urls([
+    ///     Route::with_router("/api", items),
+    ///     Route::with_router("/api", users),
+    /// ]);
+    ///
+    /// let paths = router.as_api().paths.unwrap().paths;
+    /// let tags = |path: &str| paths[path].as_item().unwrap().get.clone().unwrap().tags;
+    /// assert_eq!(tags("/api/items"), ["items"]);
+    /// assert_eq!(tags("/api/users"), ["users"]);
+    /// ```
+    #[cfg(feature = "openapi")]
+    #[must_use]
+    pub fn api_tags<I, T>(mut self, tags: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        let tags: Vec<String> = tags.into_iter().map(Into::into).collect();
+        // The tags are kept on the routes rather than on the router, so that
+        // they survive merging routers mounted at the same path.
+        for route in &mut self.urls {
+            route.add_api_tags(&tags);
+        }
+        self
+    }
+
     /// Returns the OpenAPI paths for the router.
     ///
     /// This might be useful if you want to manually serve the generated OpenAPI
@@ -524,6 +581,7 @@ impl Router {
 
         self.as_openapi_impl(
             &AbsolutePath::root(),
+            &[],
             &[],
             &mut paths,
             &mut schema_generator,
@@ -560,11 +618,12 @@ impl Router {
         &self,
         url: &AbsolutePath,
         param_names: &[&str],
+        api_tags: &[String],
         paths: &mut aide::openapi::Paths,
         schema_generator: &mut schemars::SchemaGenerator,
     ) {
         for route in &self.urls {
-            Self::route_as_openapi(route, param_names, paths, schema_generator, url);
+            Self::route_as_openapi(route, param_names, api_tags, paths, schema_generator, url);
         }
     }
 
@@ -572,10 +631,13 @@ impl Router {
     fn route_as_openapi(
         route: &Route,
         param_names: &[&str],
+        api_tags: &[String],
         paths: &mut aide::openapi::Paths,
         schema_generator: &mut schemars::SchemaGenerator,
         url: &AbsolutePath,
     ) {
+        let api_tags = crate::openapi::merge_tags(api_tags, &route.api_tags);
+
         match &route.view {
             RouteInner::Router(router) => {
                 let mut params = Vec::from(param_names);
@@ -583,7 +645,7 @@ impl Router {
 
                 let url = url.join(&AbsolutePath::new(route.url()));
 
-                router.as_openapi_impl(&url, &params, paths, schema_generator);
+                router.as_openapi_impl(&url, &params, &api_tags, paths, schema_generator);
             }
             RouteInner::ApiHandler(handler) => {
                 let mut params = Vec::from(param_names);
@@ -594,12 +656,12 @@ impl Router {
                 let mut route_context = crate::openapi::RouteContext::new();
                 route_context.param_names = &params;
 
-                paths.paths.insert(
-                    url.into(),
-                    aide::openapi::ReferenceOr::Item(
-                        handler.as_api_route(&route_context, schema_generator),
-                    ),
-                );
+                let mut path_item = handler.as_api_route(&route_context, schema_generator);
+                crate::openapi::add_path_item_tags(&mut path_item, &api_tags);
+
+                paths
+                    .paths
+                    .insert(url.into(), aide::openapi::ReferenceOr::Item(path_item));
             }
             RouteInner::Handler(_) => {}
         }
@@ -791,6 +853,8 @@ pub struct Route {
     view: RouteInner,
     name: Option<RouteName>,
     app_name: Option<AppName>,
+    #[cfg(feature = "openapi")]
+    api_tags: Vec<String>,
 }
 
 impl Route {
@@ -822,6 +886,8 @@ impl Route {
             view: RouteInner::Handler(Arc::new(into_box_request_handler(handler))),
             name: None,
             app_name: None,
+            #[cfg(feature = "openapi")]
+            api_tags: Vec::new(),
         }
     }
 
@@ -860,6 +926,8 @@ impl Route {
             )),
             name: None,
             app_name: None,
+            #[cfg(feature = "openapi")]
+            api_tags: Vec::new(),
         }
     }
 
@@ -892,6 +960,8 @@ impl Route {
             view: RouteInner::Handler(Arc::new(into_box_request_handler(handler))),
             name: Some(RouteName(name.into())),
             app_name: None,
+            #[cfg(feature = "openapi")]
+            api_tags: Vec::new(),
         }
     }
 
@@ -931,6 +1001,8 @@ impl Route {
             )),
             name: Some(RouteName(name.into())),
             app_name: None,
+            #[cfg(feature = "openapi")]
+            api_tags: Vec::new(),
         }
     }
 
@@ -957,6 +1029,8 @@ impl Route {
             view: RouteInner::Router(Arc::new(router)),
             name: None,
             app_name: None,
+            #[cfg(feature = "openapi")]
+            api_tags: Vec::new(),
         }
     }
 
@@ -965,6 +1039,27 @@ impl Route {
         if self.app_name.is_none() {
             self.app_name = app_name;
         }
+        self
+    }
+
+    /// Puts `tags` in front of the OpenAPI tags of this route.
+    #[cfg(feature = "openapi")]
+    fn add_api_tags(&mut self, tags: &[String]) {
+        self.api_tags = crate::openapi::merge_tags(tags, &self.api_tags);
+    }
+
+    /// Moves the OpenAPI tags of a nested router's mount route onto a route
+    /// taken out of that router when merging it with another one.
+    #[must_use]
+    #[cfg(feature = "openapi")]
+    fn with_mount_api_tags(mut self, mount: &Route) -> Self {
+        self.add_api_tags(&mount.api_tags);
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(feature = "openapi"))]
+    fn with_mount_api_tags(self, _mount: &Route) -> Self {
         self
     }
 
