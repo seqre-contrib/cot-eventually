@@ -76,7 +76,7 @@ impl<S, ResBody, E> Service<Request> for IntoCotResponse<S>
 where
     S: Service<Request, Response = http::Response<ResBody>>,
     ResBody: http_body::Body<Data = Bytes, Error = E> + Send + Sync + 'static,
-    E: std::error::Error + Send + Sync + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
 {
     type Response = Response;
     type Error = S::Error;
@@ -96,7 +96,7 @@ where
 fn map_response<ResBody, E>(response: http::response::Response<ResBody>) -> Response
 where
     ResBody: http_body::Body<Data = Bytes, Error = E> + Send + Sync + 'static,
-    E: std::error::Error + Send + Sync + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
 {
     response.map(|body| Body::wrapper(BoxBody::new(body.map_err(map_err))))
 }
@@ -177,9 +177,56 @@ where
 
 fn map_err<E>(error: E) -> Error
 where
-    E: std::error::Error + Send + Sync + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
 {
-    #[expect(trivial_casts)]
-    let boxed = Box::new(error) as Box<dyn std::error::Error + Send + Sync>;
+    let boxed: Box<dyn std::error::Error + Send + Sync> = error.into();
     boxed.downcast::<Error>().map_or_else(Error::wrap, |e| *e)
+}
+
+#[cfg(test)]
+mod tests {
+    use http_body::Frame;
+    use http_body_util::{BodyExt, Full, StreamBody};
+    use tower::{Layer, ServiceExt, service_fn};
+
+    use super::*;
+
+    type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+    async fn respond<B>(body: B) -> Response
+    where
+        B: http_body::Body<Data = Bytes, Error = BoxError> + Send + Sync + 'static,
+    {
+        let mut body = Some(body);
+        let service = service_fn(move |_request: Request| {
+            let response = http::Response::new(body.take().expect("called once"));
+            async move { Ok::<_, Error>(response) }
+        });
+        let request = http::Request::new(Body::empty());
+        IntoCotResponseLayer::new()
+            .layer(service)
+            .oneshot(request)
+            .await
+            .unwrap()
+    }
+
+    #[cot::test]
+    async fn into_cot_response_takes_bodies_with_boxed_errors() {
+        // such as the bodies of `tower-http`'s middleware
+        let body = Full::new(Bytes::from_static(b"hello")).map_err(|never| match never {});
+        let response = respond(body).await;
+
+        assert_eq!(response.into_body().into_bytes().await.unwrap(), "hello");
+    }
+
+    #[cot::test]
+    async fn into_cot_response_keeps_a_boxed_body_error() {
+        let frames: Vec<Result<Frame<Bytes>, BoxError>> =
+            vec![Err(Box::new(std::io::Error::other("connection lost")))];
+        let body = StreamBody::new(futures::stream::iter(frames));
+        let response = respond(body).await;
+
+        let error = response.into_body().into_bytes().await.unwrap_err();
+        assert!(error.to_string().contains("connection lost"), "{error}");
+    }
 }
