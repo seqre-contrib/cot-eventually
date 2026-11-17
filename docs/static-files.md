@@ -70,6 +70,8 @@ cache_timeout = "1year"  # "Cache-Control" header value
 
 Please refer to [humantime crate documentation](https://docs.rs/humantime/latest/humantime/fn.parse_duration.html) on the details about the [`cache_timeout`](struct@cot::config::StaticFilesConfig#structfield.cache_timeout) configuration format.
 
+Every static file is also served with a weak `ETag` made from its contents. Once the cache timeout has passed, the browser asks again with `If-None-Match`, and Cot answers `304 Not Modified` without sending the file when it hasn't changed. This keeps a short cache timeout cheap for files whose URLs don't carry a hash.
+
 ## Production Deployment
 
 ### Collecting Static Files

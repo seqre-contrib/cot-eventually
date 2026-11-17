@@ -86,6 +86,9 @@ pub(crate) struct StaticFiles {
 struct StaticFileWithMeta {
     url: String,
     file: StaticFile,
+    /// A weak entity tag made from the file's content. It is weak because a
+    /// compression middleware may change the bytes on the way out.
+    etag: header::HeaderValue,
 }
 
 impl StaticFiles {
@@ -104,9 +107,17 @@ impl StaticFiles {
         let path = file.path.clone();
         let file = StaticFileWithMeta {
             url: self.file_url(&file),
+            etag: Self::file_etag(&file),
             file,
         };
         self.files.insert(path, file);
+    }
+
+    #[must_use]
+    fn file_etag(file: &StaticFile) -> header::HeaderValue {
+        let hash = hex::encode(&blake3::hash(file.content.as_ref()).as_slice()[0..16]);
+        header::HeaderValue::from_str(&format!("W/\"{hash}\""))
+            .expect("a hex hash is a valid header value")
     }
 
     fn file_url(&self, file: &StaticFile) -> String {
@@ -131,10 +142,14 @@ impl StaticFiles {
     }
 
     #[must_use]
+    #[cfg(test)]
     fn get_file(&self, path: &str) -> Option<&StaticFile> {
-        self.files
-            .get(path)
+        self.get_file_with_meta(path)
             .map(|file_with_meta| &file_with_meta.file)
+    }
+
+    fn get_file_with_meta(&self, path: &str) -> Option<&StaticFileWithMeta> {
+        self.files.get(path)
     }
 
     #[must_use]
@@ -270,6 +285,11 @@ impl StaticFile {
 /// When a request is made to a path starting with `/static/`, the middleware
 /// checks if the file exists in the static files collection. If it does, the
 /// file is served. Otherwise, the request is passed to the inner service.
+///
+/// Each file is served with a weak `ETag` made from its content. A request
+/// whose `If-None-Match` names it gets `304 Not Modified` without the file, so
+/// a browser revalidating its copy after the cache timeout doesn't download it
+/// again.
 #[derive(Debug, Clone)]
 pub struct StaticFilesMiddleware {
     static_files: Arc<StaticFiles>,
@@ -327,14 +347,22 @@ where
 
     fn call(&mut self, mut req: Request<ReqBody>) -> Self::Future {
         let path = req.uri().path();
-        let file_contents =
-            if let Some(stripped_path) = path.strip_prefix(&self.static_files.url_prefix) {
-                self.static_files
-                    .get_file(stripped_path)
-                    .map(StaticFile::as_response)
+        let file = path
+            .strip_prefix(&self.static_files.url_prefix)
+            .and_then(|stripped_path| self.static_files.get_file_with_meta(stripped_path));
+        let file_contents = file.map(|file| {
+            let mut response = if is_not_modified(&req, &file.etag) {
+                let mut response = Response::new(Body::empty());
+                *response.status_mut() = http::StatusCode::NOT_MODIFIED;
+                response
             } else {
-                None
+                file.file.as_response()
             };
+            response
+                .headers_mut()
+                .insert(header::ETAG, file.etag.clone());
+            response
+        });
 
         if let Some(mut response) = file_contents {
             if let Some(timeout) = self.static_files.cache_timeout {
@@ -352,6 +380,23 @@ where
             }
         }
     }
+}
+
+/// Whether the browser already has the file tagged `etag`: a `GET` or `HEAD`
+/// request whose `If-None-Match` names it (compared weakly, as RFC 9110
+/// requires for `If-None-Match`) or is `*`.
+fn is_not_modified<ReqBody>(req: &Request<ReqBody>, etag: &header::HeaderValue) -> bool {
+    if req.method() != http::Method::GET && req.method() != http::Method::HEAD {
+        return false;
+    }
+    let opaque = |tag: &str| tag.trim().trim_start_matches("W/").to_owned();
+    let ours = opaque(etag.to_str().unwrap_or_default());
+    req.headers()
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|tag| tag.trim() == "*" || opaque(tag) == ours)
 }
 
 pin_project! {
@@ -443,6 +488,77 @@ mod tests {
         let mut static_files = StaticFiles::new(&StaticFilesConfig::default());
         static_files.add_file(StaticFile::new("test.txt", "This is a test file"));
         static_files
+    }
+
+    async fn static_file_response(if_none_match: Option<&str>) -> Response {
+        let middleware = StaticFilesMiddleware {
+            static_files: Arc::new(create_static_files()),
+        };
+        let service = middleware.layer(tower::service_fn(|_req| async {
+            Ok::<_, std::convert::Infallible>(Response::new(Body::empty()))
+        }));
+        let mut request = Request::builder().uri("/static/test.txt");
+        if let Some(tag) = if_none_match {
+            request = request.header(header::IF_NONE_MATCH, tag);
+        }
+        service
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[cot::test]
+    async fn static_files_middleware_sends_a_weak_etag() {
+        let response = static_file_response(None).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let etag = response.headers()[header::ETAG].to_str().unwrap();
+        assert!(etag.starts_with("W/\"") && etag.ends_with('"'), "{etag}");
+        assert_eq!(etag.len(), "W/\"\"".len() + 32);
+    }
+
+    #[cot::test]
+    async fn static_files_middleware_answers_a_matching_etag_with_not_modified() {
+        let etag = static_file_response(None).await.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let strong = etag.trim_start_matches("W/").to_owned();
+
+        for if_none_match in [
+            etag.clone(),
+            strong,
+            format!("\"other\", {etag}"),
+            "*".to_owned(),
+        ] {
+            let response = static_file_response(Some(&if_none_match)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_MODIFIED,
+                "{if_none_match}"
+            );
+            assert_eq!(response.headers()[header::ETAG], etag.as_str());
+            assert!(response.into_body().into_bytes().await.unwrap().is_empty());
+        }
+    }
+
+    #[cot::test]
+    async fn static_files_middleware_sends_the_file_for_another_etag() {
+        let response = static_file_response(Some("W/\"other\"")).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().into_bytes().await.unwrap(),
+            Bytes::from("This is a test file")
+        );
+    }
+
+    #[test]
+    fn a_changed_file_gets_another_etag() {
+        let first = StaticFiles::file_etag(&StaticFile::new("test.txt", "one"));
+        let second = StaticFiles::file_etag(&StaticFile::new("test.txt", "two"));
+
+        assert_ne!(first, second);
     }
 
     #[cot::test]
